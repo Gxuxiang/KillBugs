@@ -54,6 +54,16 @@ AKBCharacter::AKBCharacter()
 		}
 		MeshComp->SetRelativeLocation(FVector(0.f, 0.f, -90.f));
 		MeshComp->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
+
+		// A deferred decal projects onto EVERYTHING inside its box, not just the surface it was
+		// aimed at. The slime puddles are meant for the floor, and with this on the player wore
+		// a flat green splat across the chest for twenty seconds after standing near a kill -
+		// the decal projected onto the character like a decal onto a wall, because that is
+		// exactly what it is.
+		//
+		// The camera never gets close enough for decals on the player to be worth having, and
+		// this is the only thing that stops them.
+		MeshComp->SetReceivesDecals(false);
 	}
 
 	// ---- Combat ------------------------------------------------------------------------

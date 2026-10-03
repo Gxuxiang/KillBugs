@@ -112,6 +112,13 @@ void UKBEnemyVisualizerComponent::EnsureInstanceComponents(const AKBEnemyDirecto
 		Instances->SetCastShadow(false);
 		Instances->SetCanEverAffectNavigation(false);
 
+		// A deferred decal projects onto everything inside its box, so a bug walking over a
+		// slime puddle was being painted with it - a flat splat stuck to its back. The puddles
+		// are for the floor, and the swarm never needs to receive decals: nothing is ever
+		// decalled onto a bug on purpose, and at 50-130 pixels the effect only ever reads as a
+		// texture glitch.
+		Instances->SetReceivesDecals(false);
+
 		Instances->RegisterComponent();
 		ArchetypeInstances[Index] = Instances;
 
