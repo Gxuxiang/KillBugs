@@ -1,0 +1,28 @@
+# Unreal Engine generated / per-machine. None of this belongs in version control:
+# Intermediate alone is 2.7 GB, and every one of these is rebuilt or regenerated locally.
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Visual Studio / IDE
+.vs/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.user
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------------------
+# What IS tracked: the .uproject, Config/, Content/, Source/, Tools/, Docs/.
+#
+# Content/ is 163 MB of binary .uasset files, which is normal and unavoidable for an Unreal
+# project - a .uasset cannot be diffed or merged, so expect "one locker at a time" on it.
+# The largest single file is 20 MB, well under GitHub's 100 MB hard limit.
+# ---------------------------------------------------------------------------------------
