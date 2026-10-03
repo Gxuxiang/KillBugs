@@ -27,6 +27,8 @@
 | 系统 | 核心类 | 形态 |
 |---|---|---|
 | 虫潮 | `AKBEnemyDirector` | 最多 600 只，**一个 Actor** 里的扁平数组 + 空间哈希；复制的 `FFastArraySerializer`；HISM + 池化绘制 |
+| 虫子模型与动画 | 见 [`BugAnimation.md`](BugAnimation.md) | 真模型 + **顶点动画贴图（VAT）** 烘焙的骨骼动画；每只虫子**独立相位**，不同步摆腿 |
+| 死亡爆浆与粘液 | `UKBGoreComponent` | 贴花池（上限 64、超时淡出）+ Niagara 每帧生成预算；**从复制数组的移除本地推导**，零带宽 |
 | 子弹 | `AKBProjectileDirector` | 同样形态：**一个 Actor**、一个飞行数组、不是每发一个 Actor。**伤害在命中时结算**，不是开火时 |
 | 武器 | `UKBWeaponInventoryComponent` + `UKBWeaponDefinition` | 数据驱动；自动/手动/范围三种投放方式 |
 | 卡牌 | `UKBCardDefinition` + `AKBGameMode` | 每波一次选卡；卡池靠**扫描资产目录**发现，不维护手工列表 |
@@ -111,6 +113,9 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 | 全员准备 → 开局 → 双方进竞技场 | ✅ 实测 |
 | **真人在两个窗口点完整流程** | ✅ 已做（2026-10-03） |
 | 子弹复制无 NetSerialize 警告 | ✅ 实测（两边 0 条） |
+| **虫子真模型 + 腿会动 + 朝向正确** | ✅ 实测（2026-10-04，编辑器烘焙后肉眼看） |
+| 每实例动画相位（600 只不同步） | ✅ 实测（日志里各槽位 TimeOffset 互不相同） |
+| **死亡贴花的观感** | ❌ **还没有材质**，现在是个发光方块 —— 做法见 [`BugAnimation.md`](BugAnimation.md) |
 | 大厅 UI 的**视觉质量**（排版/字体/悬停手感） | ⚠️ **只看过一次，没有细看** |
 | 竞技场在联机下的完整玩法 | ⚠️ 只跑到"进图 + swarm 起来"，没打完整局 |
 | `AKBGameMode::Logout` 的注释改动 | 无行为变化，仅澄清（原 TODO 是过期的） |
@@ -190,6 +195,11 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 
 ## 未决问题
 
+0. **死亡贴花还没有材质** —— 贴花池已经建好、位置也对，但没有材质时引擎给的是默认贴花材质，
+   看起来是**一个发光的大方块**。需要按 `UKBGameSettings::SlimeDecalMaterial` 的说明做一个
+   Deferred Decal 材质（`Base Color` + `Opacity` 两个参数名要与 C++ 一致）。
+   另外**贴花的数量上限与存活时间写在 C++ 里且无处可改**（gore 组件是代码创建的，
+   `EditDefaultsOnly` 不生效），应该像其他设置一样挪进 `UKBGameSettings`。
 1. **主机要不要也按准备？** 现在是"所有人包括主机都要按"。想让主机免按直接开，
    要**同时**改两处，否则按钮和规则会不一致：
    `AKBLobbyHud::DrawButtons` 里 Start 的启用条件 + `AKBLobbyGameMode::RequestStartGame` 的校验。

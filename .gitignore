@@ -19,6 +19,10 @@ Saved/
 .DS_Store
 Thumbs.db
 
+# Blender writes a .blend1 next to every .blend it saves. The .blend itself is source art and IS
+# tracked (BlenderFile/), because without it the bug model cannot be re-exported or changed.
+*.blend1
+
 # ---------------------------------------------------------------------------------------
 # What IS tracked: the .uproject, Config/, Content/, Source/, Tools/, Docs/.
 #

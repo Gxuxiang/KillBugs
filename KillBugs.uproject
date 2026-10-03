@@ -51,6 +51,10 @@
 		{
 			"Name": "OnlineSubsystemNull",
 			"Enabled": true
+		},
+		{
+			"Name": "AnimToTexture",
+			"Enabled": true
 		}
 	]
 }

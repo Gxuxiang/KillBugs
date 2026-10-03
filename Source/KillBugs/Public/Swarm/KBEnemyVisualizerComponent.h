@@ -5,6 +5,7 @@
 #include "KBEnemyVisualizerComponent.generated.h"
 
 class UInstancedStaticMeshComponent;
+class UAnimToTextureDataAsset;
 class AKBEnemyDirector;
 
 /** Render state for one bug, matched across frames by its network-stable id. */
@@ -68,8 +69,32 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Swarm")
 	float InterpolationTime = 0.13f;
 
+	/**
+	 * How far the instanced mesh's bounds are inflated beyond the rest pose.
+	 *
+	 * A baked vertex animation moves the vertices in the VERTEX SHADER, so the mesh's own bounds
+	 * know nothing about it. With legs kicked out and a body bobbing, the drawn bug sticks out
+	 * past the bounds it is culled against, and the swarm vanishes near the edge of the screen -
+	 * bugs popping out of existence at exactly the moment the player looks at them.
+	 *
+	 * 2.0 is generous for a bug whose animation moves it by a fraction of its own length; the
+	 * cost of being generous is a slightly larger bounding volume, which for a component that is
+	 * never culled anyway is nothing.
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Swarm", meta = (ClampMin = "1.0"))
+	float BakedAnimationBoundsScale = 2.f;
+
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Swarm")
 	int32 GetRenderedBugCount() const { return Views.Num(); }
+
+	/**
+	 * Reports what per-instance animation data the instanced meshes are actually carrying.
+	 *
+	 * Written because the animation would not play and there was no way to tell WHICH half was
+	 * broken - the data never being written, or the material never reading it. A headless run
+	 * cannot render, so "look at it" is not available; this turns the question into a log line.
+	 */
+	void LogAnimationData() const;
 
 	/**
 	 * Read-only access for the HUD, which floats health bars over damaged bugs.
@@ -89,6 +114,32 @@ protected:
 	TArray<TObjectPtr<UInstancedStaticMeshComponent>> ArchetypeInstances;
 
 	/**
+	 * Baked animation per archetype, resolved once when the components are built.
+	 *
+	 * Kept because the per-instance phase is written when a slot is CLAIMED (a bug spawning),
+	 * which happens in AcquireInstanceSlot - a long way from the archetype lookup that built the
+	 * components, and at a point where going back to the director for it would be a lookup per
+	 * spawn.
+	 *
+	 * A null entry means that archetype has no baked animation, and its bugs are simply drawn
+	 * as static meshes with no per-instance data at all.
+	 */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UAnimToTextureDataAsset>> ArchetypeAnimData;
+
+	/**
+	 * The animation phase written to each slot, mirrored for the debug log.
+	 *
+	 * UInstancedStaticMeshComponent has no readable accessor for per-instance custom data, so
+	 * there is no way to ask the component what it holds. Recording what was written is enough
+	 * to tell the two failure modes apart: no data written at all, versus data written but the
+	 * material ignoring it.
+	 *
+	 * Parallel to InstanceTransforms. Debug-only state that costs a float per pooled slot.
+	 */
+	TArray<TArray<float>> WrittenTimeOffsets;
+
+	/**
 	 * Per archetype, indexed by instance slot. Live bugs occupy their own slot; slots of dead
 	 * bugs hold a hidden transform and go on a free list to be handed to the next spawn.
 	 *
@@ -106,6 +157,14 @@ protected:
 
 	/** Returns a slot to the free list and hides its instance. */
 	void ReleaseInstanceSlot(int32 ArchetypeIndex, int32 InstanceIndex);
+
+	/**
+	 * Gives a freshly created instance its own phase in the baked animation.
+	 *
+	 * Called once per slot, when the slot is born. See the implementation for why a recycled
+	 * slot does not get a new phase.
+	 */
+	void WriteAnimationPhase(int32 ArchetypeIndex, int32 InstanceIndex);
 
 	/** Live bug render state, keyed by AKBEnemyNetItem::StableId. */
 	TMap<int32, FKBEnemyView> Views;

@@ -1,5 +1,7 @@
 #include "Swarm/KBEnemyVisualizerComponent.h"
 
+#include "AnimToTextureDataAsset.h"
+#include "AnimToTextureInstancePlaybackHelpers.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Data/KBEnemyArchetype.h"
 #include "KBConsoleVariables.h"
@@ -7,6 +9,7 @@
 #include "KillBugs.h"
 #include "Materials/MaterialInterface.h"
 #include "Swarm/KBEnemyDirector.h"
+#include "Swarm/KBGoreComponent.h"
 
 DEFINE_STAT(STAT_KB_SwarmVisuals);
 
@@ -36,6 +39,8 @@ void UKBEnemyVisualizerComponent::EnsureInstanceComponents(const AKBEnemyDirecto
 	ArchetypeInstances.SetNum(Archetypes.Num());
 	InstanceTransforms.SetNum(Archetypes.Num());
 	FreeInstanceIndices.SetNum(Archetypes.Num());
+	ArchetypeAnimData.SetNum(Archetypes.Num());
+	WrittenTimeOffsets.SetNum(Archetypes.Num());
 
 	for (int32 Index = 0; Index < Archetypes.Num(); ++Index)
 	{
@@ -66,6 +71,24 @@ void UKBEnemyVisualizerComponent::EnsureInstanceComponents(const AKBEnemyDirecto
 			Instances->SetMaterial(0, Material);
 		}
 		Instances->SetWorldScale3D(Archetype->MeshScale);
+
+		// ---- Baked vertex animation -------------------------------------------------------
+		//
+		// The animation moves vertices in the vertex shader, so nothing about the profile of the
+		// drawn bug is visible to culling: the bounds have to be inflated by hand or the swarm
+		// disappears near the screen edge. SetBoundsScale is the component-level version, which
+		// is the only one reachable from Python or C++ alike - the plugin's own
+		// SetBoundsExtensions is a plain static function with no UFUNCTION macro.
+		ArchetypeAnimData[Index] = Archetype->AnimData.LoadSynchronous();
+
+		if (ArchetypeAnimData[Index])
+		{
+			// Four floats per instance, exactly the size of FAnimToTextureAutoPlayData
+			// (TimeOffset, PlayRate, StartFrame, EndFrame). This is the channel the material
+			// reads to work out which frame THIS instance is on.
+			Instances->NumCustomDataFloats = 4;
+			Instances->SetBoundsScale(BakedAnimationBoundsScale);
+		}
 
 		// This archetype owns its own component, so one vector-parameter write tints all of
 		// its bugs through a single dynamic material instance. It is what makes placeholder
@@ -141,13 +164,111 @@ int32 UKBEnemyVisualizerComponent::AcquireInstanceSlot(int32 ArchetypeIndex)
 
 	const int32 NewSlot = InstanceTransforms[ArchetypeIndex].Add(GetHiddenTransform());
 
+	// Kept the same length as the slot array so the debug mirror has a home for every slot.
+	if (WrittenTimeOffsets.IsValidIndex(ArchetypeIndex))
+	{
+		WrittenTimeOffsets[ArchetypeIndex].Add(0.f);
+	}
+
 	if (UInstancedStaticMeshComponent* Instances = ArchetypeInstances[ArchetypeIndex])
 	{
 		// The transform is overwritten this same frame; it only needs to exist.
 		Instances->AddInstance(GetHiddenTransform(), /*bWorldSpace*/ true);
+
+		// The instance now exists, so it can be given a phase. This is the only moment a slot's
+		// per-instance data is written, because it is the only moment the instance comes into
+		// being - see WriteAnimationPhase.
+		WriteAnimationPhase(ArchetypeIndex, NewSlot);
 	}
 
 	return NewSlot;
+}
+
+void UKBEnemyVisualizerComponent::LogAnimationData() const
+{
+	for (int32 Index = 0; Index < ArchetypeInstances.Num(); ++Index)
+	{
+		const UInstancedStaticMeshComponent* Instances = ArchetypeInstances[Index];
+		if (!Instances)
+		{
+			continue;
+		}
+
+		UE_LOG(LogKillBugs, Display,
+			TEXT("Swarm anim | archetype %d | mesh=%s | customFloats=%d | instances=%d | ")
+			TEXT("animData=%s | boundsScale=%.2f"),
+			Index,
+			Instances->GetStaticMesh() ? *Instances->GetStaticMesh()->GetName() : TEXT("NONE"),
+			Instances->NumCustomDataFloats,
+			Instances->GetInstanceCount(),
+			(ArchetypeAnimData.IsValidIndex(Index) && ArchetypeAnimData[Index]) ? TEXT("yes") : TEXT("NO"),
+			Instances->BoundsScale);
+
+		// The first few slots: the phase each one was born with. If these are all zero, nothing
+		// was ever written; if they are all IDENTICAL, the de-sync is not happening; if they
+		// differ, the data reached the component and the material is what is ignoring it.
+		if (!WrittenTimeOffsets.IsValidIndex(Index))
+		{
+			continue;
+		}
+
+		const int32 SlotsToShow = FMath::Min(3, WrittenTimeOffsets[Index].Num());
+		for (int32 Slot = 0; Slot < SlotsToShow; ++Slot)
+		{
+			UE_LOG(LogKillBugs, Display,
+				TEXT("    slot %d TimeOffset = %.4f"), Slot, WrittenTimeOffsets[Index][Slot]);
+		}
+	}
+}
+
+void UKBEnemyVisualizerComponent::WriteAnimationPhase(int32 ArchetypeIndex, int32 InstanceIndex)
+{
+	if (!ArchetypeAnimData.IsValidIndex(ArchetypeIndex))
+	{
+		return;
+	}
+
+	UAnimToTextureDataAsset* AnimData = ArchetypeAnimData[ArchetypeIndex];
+	UInstancedStaticMeshComponent* Instances = ArchetypeInstances.IsValidIndex(ArchetypeIndex)
+		? ArchetypeInstances[ArchetypeIndex].Get() : nullptr;
+
+	if (!AnimData || !Instances)
+	{
+		return;
+	}
+
+	FAnimToTextureAutoPlayData AutoPlay;
+	if (!UAnimToTextureInstancePlaybackLibrary::GetAutoPlayDataFromDataAsset(
+		AnimData, /*AnimationIndex*/ 0, AutoPlay))
+	{
+		return;
+	}
+
+	// TimeOffset is in SECONDS, not a normalised phase: the helper computes
+	// Frame = (Time + TimeOffset) * PlayRate * SampleRate and then wraps it. Spreading it over
+	// one whole cycle therefore starts each bug somewhere different in the animation.
+	//
+	// De-syncing is the entire reason this class uses per-instance data at all. Six hundred
+	// identical meshes playing the same frame at the same instant do not read as a swarm, they
+	// read as one machine - and the effect is strongest on a bug whose legs are its silhouette.
+	const float SampleRate = FMath::Max(AnimData->SampleRate, 1.f);
+	const float CycleSeconds = FMath::Max(
+		(AutoPlay.EndFrame - AutoPlay.StartFrame + 1.f) / SampleRate, 0.01f);
+
+	AutoPlay.TimeOffset = FMath::FRandRange(0.f, CycleSeconds);
+
+	// Deliberately NOT re-rolled when a slot is recycled from a dead bug: the instance keeps the
+	// phase it was born with. Re-rolling would be per-spawn work for a difference that cannot be
+	// seen - two bugs never occupy the same slot at the same time.
+	UAnimToTextureInstancePlaybackLibrary::UpdateInstanceAutoPlayData(
+		Instances, InstanceIndex, AutoPlay);
+
+	// Mirrored for the debug log; see WrittenTimeOffsets.
+	if (WrittenTimeOffsets.IsValidIndex(ArchetypeIndex) &&
+		WrittenTimeOffsets[ArchetypeIndex].IsValidIndex(InstanceIndex))
+	{
+		WrittenTimeOffsets[ArchetypeIndex][InstanceIndex] = AutoPlay.TimeOffset;
+	}
 }
 
 void UKBEnemyVisualizerComponent::ReleaseInstanceSlot(int32 ArchetypeIndex, int32 InstanceIndex)
@@ -207,11 +328,31 @@ void UKBEnemyVisualizerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	}
 
 	// Anything not seen this frame is gone: killed, or removed by a wave cull.
+	//
+	// This purge is also the ONLY place a death is ever noticed, and it is why nothing about a
+	// death needs replicating: over the network a death is just an item vanishing from the
+	// array, and the only record of where that bug was and what it was is the view being erased
+	// right here. The gore is told before the view goes, which is the last moment that
+	// information exists.
+	//
+	// The gore component filters out the purges that are not deaths - a wave cull takes every
+	// survivor at once, and tearing the map down takes all of them.
+	UKBGoreComponent* GoreComponent = Director ? Director->GetGoreComponent() : nullptr;
+
 	for (auto It = Views.CreateIterator(); It; ++It)
 	{
 		if (It.Value().LastSeenFrame != ReconcileFrame)
 		{
-			ReleaseInstanceSlot(It.Value().ArchetypeIndex, It.Value().InstanceIndex);
+			const FKBEnemyView& Gone = It.Value();
+
+			if (GoreComponent)
+			{
+				// DisplayLocation, not TargetLocation: the player's mental model is where they
+				// SAW the bug, and DisplayLocation is exactly where it was drawn.
+				GoreComponent->OnBugDied(Gone.DisplayLocation, Gone.ArchetypeIndex);
+			}
+
+			ReleaseInstanceSlot(Gone.ArchetypeIndex, Gone.InstanceIndex);
 			It.RemoveCurrent();
 		}
 	}
@@ -260,6 +401,10 @@ void UKBEnemyVisualizerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 				Views.Num(), ActiveBatches, PooledSlots,
 				PerfSeconds / Frames * 1000.0, Frames / PerfElapsed);
 
+			// Piggy-backed on the existing perf interval: the swarm has to be alive with bugs in
+			// it for the answer to mean anything, and that is exactly when this block runs.
+			LogAnimationData();
+
 			PerfSeconds = 0.0;
 			PerfFrames = 0;
 			PerfElapsed = 0.f;
@@ -294,8 +439,26 @@ void UKBEnemyVisualizerComponent::PushToInstances()
 			continue;
 		}
 
+		// The mesh's own forward is not necessarily the actor's +X. The swarm yaws an instance to
+		// face the way the bug is travelling, which is correct for a mesh authored looking down
+		// +X and visibly wrong for one authored looking down -X: the bug runs tail-first. The
+		// offset lives on the archetype so a replacement model can correct it without touching
+		// this loop.
+		float MeshYaw = View.DisplayYaw;
+		if (const AKBEnemyDirector* Owner = Cast<AKBEnemyDirector>(GetOwner()))
+		{
+			if (Owner->GetArchetypes().IsValidIndex(View.ArchetypeIndex))
+			{
+				if (const UKBEnemyArchetype* Archetype =
+					Owner->GetArchetypes()[View.ArchetypeIndex].Get())
+				{
+					MeshYaw += Archetype->MeshYawOffset;
+				}
+			}
+		}
+
 		Transforms[View.InstanceIndex] =
-			FTransform(FRotator(0.f, View.DisplayYaw, 0.f), View.DisplayLocation);
+			FTransform(FRotator(0.f, FRotator::NormalizeAxis(MeshYaw), 0.f), View.DisplayLocation);
 	}
 
 	// One batch write per archetype. Safe to send the whole pool including hidden slots,

@@ -8,6 +8,7 @@
 class UStaticMesh;
 class UMaterialInterface;
 class UNiagaraSystem;
+class UAnimToTextureDataAsset;
 
 /**
  * How an archetype is represented. This single knob is the switch between the two enemy
@@ -54,11 +55,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	TSoftObjectPtr<UStaticMesh> Mesh;
 
+	/**
+	 * The baked vertex animation for Mesh, from Tools/kb_setup_bug_vat.py.
+	 *
+	 * Needed at DRAW time, not just at bake time: the frame count and sample rate in here are
+	 * what tell the swarm each bug's phase through the animation, which is the only way 600
+	 * instances avoid marching in lockstep. Leave it unset and the bugs simply stand still in
+	 * their rest pose - which is exactly what an instanced static mesh does with no help.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
+	TSoftObjectPtr<UAnimToTextureDataAsset> AnimData;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	TSoftObjectPtr<UMaterialInterface> Material;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	FVector MeshScale = FVector(1.f);
+
+	/**
+	 * Degrees added to a bug's facing when its mesh is drawn.
+	 *
+	 * The swarm turns each instance to face the direction it is travelling, which assumes the
+	 * mesh was authored looking down +X. A model authored looking down -X then runs tail-first -
+	 * and nothing about the code can tell, because a bug has no obvious front in a bounds check.
+	 * 180 corrects exactly that, and 0 leaves a mesh authored the usual way alone.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
+	float MeshYawOffset = 0.f;
 
 	/**
 	 * Tints every bug of this archetype.
@@ -140,8 +163,36 @@ public:
 
 	// ---- VFX ----------------------------------------------------------------------------
 
+	/**
+	 * Burst played where the bug died, on every machine.
+	 *
+	 * The system should expose these User parameters; UKBGoreComponent writes them:
+	 *   User.SplatColor     (colour) - this archetype's SlimeColor
+	 *   User.SplatScale     (float)  - from BodyRadius, so a Brute throws more than a Runner
+	 *   User.SplatDirection (vector) - the bug's last heading, so a splat can throw forward
+	 *
+	 * A system that ignores them still works - it just will not be tinted or sized per
+	 * archetype. Leaving this unset is also fine: the decal below is the part that reads as
+	 * "something died here", and it does not need Niagara at all.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "VFX")
 	TSoftObjectPtr<UNiagaraSystem> DeathEffect;
+
+	/**
+	 * What this bug's insides look like.
+	 *
+	 * The decal MATERIAL is shared by every archetype and lives in UKBGameSettings; only the
+	 * colour is per archetype. That mirrors how the bugs themselves work - one M_KBEnemy tinted
+	 * per archetype - and it is what lets the decal pool create one dynamic material per slot
+	 * and keep it, instead of rebuilding a material instance on every reuse.
+	 *
+	 * Deliberately separate from Tint, which colours the BODY: a bug's shell colour and the
+	 * colour of what is inside it are two different art decisions, and tying them together
+	 * would make every archetype's gore the same hue as its shell by accident rather than on
+	 * purpose. Distinguishing archetypes by the colour of the puddle is the point.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "VFX")
+	FLinearColor SlimeColor = FLinearColor(0.36f, 0.72f, 0.18f, 1.f);
 
 	// ---- Classification -----------------------------------------------------------------
 

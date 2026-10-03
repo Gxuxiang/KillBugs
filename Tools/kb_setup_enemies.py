@@ -71,6 +71,18 @@ def make_archetype(asset_name, mesh_path, material_path, **properties):
     if material is not None:
         asset.set_editor_property("material", material)
 
+    # The baked vertex animation, for the same reason as mesh and material: set as an OBJECT,
+    # not as a path string. It is popped out of the property bag here rather than left to the
+    # generic loop below, which would hand set_editor_property a string where a TSoftObjectPtr
+    # is wanted.
+    anim_data_path = properties.pop("anim_data_path", None)
+    if anim_data_path:
+        anim_data = load_asset(anim_data_path)
+        if anim_data is not None:
+            asset.set_editor_property("anim_data", anim_data)
+        else:
+            warn("could not load anim data {}".format(anim_data_path))
+
     for key, value in properties.items():
         if value is None:
             # An enum that could not be resolved; leave the property at its C++ default
@@ -94,9 +106,40 @@ def make_archetype(asset_name, mesh_path, material_path, **properties):
 
 asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
 
-CUBE = "/Game/LevelPrototyping/Meshes/SM_Cube"
-CHAMFER = "/Game/LevelPrototyping/Meshes/SM_ChamferCube"
-CYLINDER = "/Game/LevelPrototyping/Meshes/SM_Cylinder"
+# ---------------------------------------------------------------------------------------
+# The real bug
+#
+# All three archetypes now share one baked mesh and one animation, distinguished by scale and
+# by BodyRadius. One model is what the project has; three would be three meshes, three baked
+# animation texture sets and three times the video memory for a difference the player reads at
+# 50-130 pixels.
+#
+# These three paths come out of Tools/kb_setup_bug_vat.py, and the MATERIAL IS NOT OPTIONAL:
+# MI_Bug_VertexAnimation is the instance that knows how to read the baked textures. Pointing
+# the archetype back at the mesh's own M_bug would draw the bug in its rest pose forever, with
+# no error anywhere.
+# ---------------------------------------------------------------------------------------
+# Authored by hand in the editor, in the plugin's own example workflow (BP_AnimToTexture), using
+# BONE mode rather than the vertex mode kb_setup_bug_vat.py attempted. Bone mode is the plugin's
+# default and the one its example material is built for; the scripted attempt had to force Vertex
+# because Bone mode writes a bone-weight texture that only the editor's property-change path ever
+# creates, and asserts on the null when driven from a script.
+BUG_MESH = "/Game/KillBugs/Mesh/bug/VAT/SM_bug"
+BUG_ANIM_DATA = "/Game/KillBugs/Mesh/bug/VAT/DA_BoneAnimation_bug"
+BUG_MATERIAL = "/Game/KillBugs/Mesh/bug/VAT/M_bug_bone_Inst"
+
+# The model is authored looking down -X, while the swarm turns each instance to face the way the
+# bug is travelling - which assumes +X. 180 corrects it; without it the bugs run tail-first.
+BUG_MESH_YAW_OFFSET = 180.0
+
+# Uniform, and derived rather than guessed: the baked mesh measures 53.8 x 45.4 units half-extent,
+# and BodyRadius is a radius, so scaling by BodyRadius / 53.8 makes the drawn bug's half-length
+# exactly the circle it is hit in. The placeholder scales these replace were tuned for a
+# 100-unit cube and would have rendered the bug at the wrong size.
+#
+#   Runner  28 / 53.81 = 0.52
+#   Grunt   42 / 53.81 = 0.78
+#   Brute   85 / 53.81 = 1.58
 
 # Our own material, NOT any of the LevelPrototyping ones.
 #
@@ -143,9 +186,11 @@ TIER_INSTANCED = enum_member("KBRenderTier", "EKBRenderTier", members=("INSTANCE
 
 # --- Grunt: the baseline. Slow, cheap, arrives in numbers. -----------------------------
 make_archetype(
-    "DA_Bug_Grunt", CUBE, ENEMY_MAT,
+    "DA_Bug_Grunt", BUG_MESH, BUG_MATERIAL,
+    anim_data_path=BUG_ANIM_DATA,
+    mesh_yaw_offset=BUG_MESH_YAW_OFFSET,
     display_name=unreal.Text("Grunt"),
-    mesh_scale=unreal.Vector(0.8, 0.8, 0.45),
+    mesh_scale=unreal.Vector(0.78, 0.78, 0.78),
     tint=unreal.LinearColor(0.42, 0.50, 0.62, 1.0),
     tint_parameter_name=unreal.Name(TINT_PARAM),
     base_health=10.0, health_per_wave=4.0,
@@ -160,9 +205,11 @@ make_archetype(
 
 # --- Runner: fast and fragile, flattens the front line. ---------------------------------
 make_archetype(
-    "DA_Bug_Runner", CHAMFER, ENEMY_MAT,
+    "DA_Bug_Runner", BUG_MESH, BUG_MATERIAL,
+    anim_data_path=BUG_ANIM_DATA,
+    mesh_yaw_offset=BUG_MESH_YAW_OFFSET,
     display_name=unreal.Text("Runner"),
-    mesh_scale=unreal.Vector(0.5, 0.5, 0.3),
+    mesh_scale=unreal.Vector(0.52, 0.52, 0.52),
     tint=unreal.LinearColor(0.95, 0.48, 0.10, 1.0),
     tint_parameter_name=unreal.Name(TINT_PARAM),
     base_health=6.0, health_per_wave=2.0,
@@ -177,9 +224,11 @@ make_archetype(
 
 # --- Brute: slow, tanky, orbits so it is not simply a bigger grunt. ---------------------
 make_archetype(
-    "DA_Bug_Brute", CYLINDER, ENEMY_MAT,
+    "DA_Bug_Brute", BUG_MESH, BUG_MATERIAL,
+    anim_data_path=BUG_ANIM_DATA,
+    mesh_yaw_offset=BUG_MESH_YAW_OFFSET,
     display_name=unreal.Text("Brute"),
-    mesh_scale=unreal.Vector(1.4, 1.4, 0.9),
+    mesh_scale=unreal.Vector(1.58, 1.58, 1.58),
     tint=unreal.LinearColor(0.62, 0.13, 0.13, 1.0),
     tint_parameter_name=unreal.Name(TINT_PARAM),
     # Tanky, but not a slog: 40 HP is roughly two shotgun blasts, so it reads as heavy

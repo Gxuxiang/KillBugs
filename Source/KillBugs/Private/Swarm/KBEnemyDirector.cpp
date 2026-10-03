@@ -10,6 +10,7 @@
 #include "GameFramework/PlayerController.h"
 #include "KBStats.h"
 #include "Net/UnrealNetwork.h"
+#include "Swarm/KBGoreComponent.h"
 #include "Swarm/KBEnemyVisualizerComponent.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -43,6 +44,12 @@ AKBEnemyDirector::AKBEnemyDirector()
 
 	Visualizer = CreateDefaultSubobject<UKBEnemyVisualizerComponent>(TEXT("SwarmVisualizer"));
 	Visualizer->SetupAttachment(SceneRoot);
+
+	// Death splatter and slime. A sibling of the visualizer rather than part of it: the
+	// visualizer draws bugs, this owns the decal pool and the effect budget, and the only thing
+	// between them is a single call when a bug stops being drawn.
+	Gore = CreateDefaultSubobject<UKBGoreComponent>(TEXT("Gore"));
+	Gore->SetupAttachment(SceneRoot);
 
 	// One actor replicates the whole swarm, so it must never be culled for relevancy and
 	// never go dormant - dormancy would stop the fast array from being sent at all.

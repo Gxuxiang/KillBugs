@@ -7,6 +7,7 @@
 
 class UKBEnemyArchetype;
 class UKBEnemyVisualizerComponent;
+class UKBGoreComponent;
 class AKBPlayerState;
 
 /**
@@ -120,6 +121,14 @@ public:
 	TArrayView<const FKBEnemySim> GetSimView() const { return Sim; }
 	const TArray<TObjectPtr<UKBEnemyArchetype>>& GetArchetypes() const { return Archetypes; }
 
+	/**
+	 * Death splatter and slime. The visualizer calls into this when a bug stops being drawn.
+	 *
+	 * A getter rather than the visualizer reaching for a sibling through GetOwner(): the two
+	 * components should not have to agree on their own names.
+	 */
+	UKBGoreComponent* GetGoreComponent() const { return Gore; }
+
 	// ---- Console commands (public so the delegates can bind) -----------------------------
 
 	// FConsoleCommandWithWorldAndArgsDelegate takes only (Args, World) - there is no
@@ -134,6 +143,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "KillBugs|Swarm")
 	TObjectPtr<UKBEnemyVisualizerComponent> Visualizer;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "KillBugs|Swarm")
+	TObjectPtr<UKBGoreComponent> Gore;
 
 	/**
 	 * Bug types. Populated from the generated archetype assets in the constructor so Phase 2

@@ -19,7 +19,8 @@ public class KillBugs : ModuleRules
 			"UMG",             // HUD, card draft, wave banner
 			"DeveloperSettings", // UKBEnemyPoolSettings
 			"OnlineSubsystem", // IOnlineSession, behind UKBSessionSubsystem
-			"OnlineSubsystemUtils" // the IpNetDriver the sessions hand off to
+			"OnlineSubsystemUtils", // the IpNetDriver the sessions hand off to
+			"AnimToTexture" // per-instance playback for the baked swarm animation
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
