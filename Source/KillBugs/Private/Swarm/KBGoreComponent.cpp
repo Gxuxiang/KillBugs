@@ -30,6 +30,15 @@ namespace
 
 	/** Pitch that points the decal's projection straight down. */
 	const FRotator DecalRotation(-90.f, 0.f, 0.f);
+
+	/**
+	 * How far the decal projects along its own axis.
+	 *
+	 * This is DecalSize.X, the depth - it has to reach from where the component sits down
+	 * through the floor. The engine's default for it is 128, which is generous for a decal
+	 * lying on the ground and comfortably more than the 8 units of clearance used here.
+	 */
+	constexpr float DecalProjectionDepth = 128.f;
 }
 
 UKBGoreComponent::UKBGoreComponent()
@@ -95,9 +104,9 @@ void UKBGoreComponent::EnsureDecalPool(const AKBEnemyDirector* Director)
 		// Movable: a pooled decal is re-placed for every bug that reuses its slot.
 		Decal->SetMobility(EComponentMobility::Movable);
 
-		// The projection box. Wide and shallow, which is what a puddle wants to be; the size is
-		// rescaled per use from the archetype's BodyRadius.
-		Decal->DecalSize = FVector(64.f, 64.f, 64.f);
+		// Placeholder until a bug claims the slot; the real size comes from the archetype's
+		// BodyRadius. Ordered (depth, width, height) like every other DecalSize here.
+		Decal->DecalSize = FVector(DecalProjectionDepth, 64.f, 64.f);
 
 		// Nothing to turn off: UDecalComponent derives from USceneComponent, not
 		// UPrimitiveComponent, so it has no collision, shadow or navigation to disable in the
@@ -201,8 +210,18 @@ void UKBGoreComponent::OnBugDied(const FVector& Location, int32 ArchetypeIndex)
 		// identical circles.
 		const float Spread = FMath::FRandRange(1.6f, 2.4f);
 
-		// The projection box is half-extents in X and Y, and full depth in Z.
-		Decal->DecalSize = FVector(Radius * Spread, Radius * Spread, 128.f);
+		// DecalSize is (DEPTH along the projection axis, width, height) - X is not a width.
+		// The engine's own default is (128, 256, 256), which is the giveaway.
+		//
+		// An earlier version put the puddle's width in X and a constant in Z, which made the
+		// projection a shallow box - about 84 units deep, barely reaching the floor from the
+		// 8 units the component sits at - with a 84x128 cross-section. Combined with the random
+		// yaw below, that drew a field of rectangles pointing in every direction: the "slime is
+		// a bunch of squares" that sent us looking at the material, which was blameless.
+		//
+		// Y and Z are equal on purpose: a square cross-section means the random yaw cannot
+		// change the shape, only the orientation of the texture inside it.
+		Decal->DecalSize = FVector(DecalProjectionDepth, Radius * Spread, Radius * Spread);
 
 		if (UMaterialInstanceDynamic* Dynamic = DecalMIDs[Slot])
 		{
