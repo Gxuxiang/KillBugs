@@ -1,5 +1,7 @@
 #include "Swarm/KBGoreComponent.h"
 
+#include "Audio/KBListenerLocation.h"
+#include "Components/AudioComponent.h"
 #include "Components/DecalComponent.h"
 #include "Data/KBEnemyArchetype.h"
 #include "Engine/World.h"
@@ -10,6 +12,7 @@
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "Sound/SoundBase.h"
 #include "Swarm/KBEnemyDirector.h"
 
 namespace
@@ -57,6 +60,7 @@ void UKBGoreComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	SplatsThisFrame = 0;
+	DeathSoundsThisFrame = 0;
 
 	UpdateDecals();
 }
@@ -240,6 +244,11 @@ void UKBGoreComponent::OnBugDied(const FVector& Location, int32 ArchetypeIndex)
 		++ActiveDecals;
 	}
 
+	// ---- The death sound ----
+	// Before the burst, and outside its budget: the sound and the particles are gated by
+	// different limits, so a frame that has spent its splats must not also go silent.
+	PlayDeathSound(*Archetype, Location);
+
 	// ---- The burst ----
 	// Budgeted separately from the puddles: a puddle is a single quad and reads as the record
 	// that something died; the burst is the expensive half, and a wave ending can ask for
@@ -272,6 +281,127 @@ void UKBGoreComponent::OnBugDied(const FVector& Location, int32 ArchetypeIndex)
 	// it just will not be tinted or sized per archetype.
 	Burst->SetColorParameter(TEXT("SplatColor"), Archetype->SlimeColor);
 	Burst->SetFloatParameter(TEXT("SplatScale"), FMath::Max(Archetype->BodyRadius, 1.f) / 40.f);
+}
+
+void UKBGoreComponent::EnsureDeathSoundPool()
+{
+	if (DeathSoundPool.Num() > 0 || MaxDeathSoundVoices <= 0)
+	{
+		return;
+	}
+
+	DeathSoundPool.Reserve(MaxDeathSoundVoices);
+
+	for (int32 Index = 0; Index < MaxDeathSoundVoices; ++Index)
+	{
+		UAudioComponent* Voice = NewObject<UAudioComponent>(GetOwner());
+		Voice->SetupAttachment(this);
+		Voice->SetMobility(EComponentMobility::Movable);
+
+		// The pool outlives every individual death, so nothing may destroy itself when its
+		// sound ends - that would take the slot with it.
+		Voice->bAutoDestroy = false;
+		Voice->bAllowSpatialization = true;
+
+		// Positional, with the engine's distance falloff switched off and replaced by the one
+		// computed in PlayDeathSound. Same reasoning as UKBSwarmAudioComponent: the project has
+		// no USoundAttenuation assets to point at, and the archetype - not the sound asset - is
+		// what knows how far a death should carry. Spatialisation is a separate flag, so this
+		// costs none of the left/right sense of where the bug died.
+		Voice->bOverrideAttenuation = true;
+		Voice->AttenuationOverrides.bAttenuate = false;
+		Voice->AttenuationOverrides.bSpatialize = true;
+
+		Voice->RegisterComponent();
+
+		DeathSoundPool.Add(Voice);
+	}
+}
+
+int32 UKBGoreComponent::AcquireDeathSoundSlot()
+{
+	for (int32 Index = 0; Index < DeathSoundPool.Num(); ++Index)
+	{
+		if (UAudioComponent* Voice = DeathSoundPool[Index].Get())
+		{
+			if (!Voice->IsPlaying())
+			{
+				return Index;
+			}
+		}
+	}
+
+	// Every voice is busy. The death is dropped rather than stealing one - see
+	// MaxDeathSoundVoices.
+	return INDEX_NONE;
+}
+
+void UKBGoreComponent::PlayDeathSound(const UKBEnemyArchetype& Archetype, const FVector& Location)
+{
+	USoundBase* Sound = Archetype.DeathSound.LoadSynchronous();
+	if (!Sound)
+	{
+		// Not an error, for the same reason a missing DeathEffect is not: an archetype whose
+		// sound has not landed yet should still leave slime and still play its burst.
+		return;
+	}
+
+	// Both cheap gates run before the pool is even built, so a wave-end cull costs a few
+	// distance checks rather than four hundred Stop/SetSound/Play round trips.
+	if (DeathSoundsThisFrame >= MaxDeathSoundsPerFrame)
+	{
+		return;
+	}
+
+	// Gated on a LOCAL LISTENER, not on authority. The visualizer calls us on every machine, and
+	// a dedicated server has no listener at all - playing there would be a voice mixed into
+	// nothing. Note this is deliberately NOT the pattern in
+	// AKBProjectileDirector::SpawnImpactFeedback, which gates on authority and so leaves clients
+	// unable to hear their own weapon impacts.
+	FVector Listener = FVector::ZeroVector;
+	if (!KBListener::FindLocation(GetWorld(), Listener))
+	{
+		return;
+	}
+
+	const float Distance = KBListener::HearingDistance(Listener, Location);
+	if (Distance > MaxDeathSoundDistance)
+	{
+		// Most deaths in a full wave happen across the arena, and this is the line that makes
+		// them free.
+		return;
+	}
+
+	EnsureDeathSoundPool();
+
+	const int32 Slot = AcquireDeathSoundSlot();
+	if (Slot == INDEX_NONE)
+	{
+		return;
+	}
+
+	++DeathSoundsThisFrame;
+
+	UAudioComponent* Voice = DeathSoundPool[Slot].Get();
+	if (!Voice)
+	{
+		return;
+	}
+
+	// Same falloff shape as the movement sounds, so a bug that dies while it is being heard does
+	// not jump in level at the moment it changes from one to the other.
+	const float Falloff = 1.f - FMath::Clamp(Distance / FMath::Max(MaxDeathSoundDistance, 1.f), 0.f, 1.f);
+
+	const float Pitch = FMath::FRandRange(
+		FMath::Min(Archetype.DeathSoundPitchMin, Archetype.DeathSoundPitchMax),
+		FMath::Max(Archetype.DeathSoundPitchMin, Archetype.DeathSoundPitchMax));
+
+	Voice->Stop();
+	Voice->SetSound(Sound);
+	Voice->SetWorldLocation(Location);
+	Voice->SetVolumeMultiplier(Archetype.DeathSoundVolume * Falloff);
+	Voice->SetPitchMultiplier(Pitch);
+	Voice->Play();
 }
 
 void UKBGoreComponent::UpdateDecals()

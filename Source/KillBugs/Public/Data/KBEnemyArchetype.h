@@ -9,6 +9,7 @@ class UStaticMesh;
 class UMaterialInterface;
 class UNiagaraSystem;
 class UAnimToTextureDataAsset;
+class USoundBase;
 
 /**
  * How an archetype is represented. This single knob is the switch between the two enemy
@@ -193,6 +194,80 @@ public:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "VFX")
 	FLinearColor SlimeColor = FLinearColor(0.36f, 0.72f, 0.18f, 1.f);
+
+	// ---- Audio --------------------------------------------------------------------------
+	//
+	// Two sounds per bug, and the split follows the one that already exists for VFX: one that
+	// runs for as long as the bug is doing something (moving), and one that fires at the single
+	// instant it stops (dying). Both are optional - an archetype with neither is silent, which
+	// is what every archetype is until art lands, and neither breaks anything.
+	//
+	// Unlike DeathEffect, which is spawned once per bug per death, MoveSound is played by a
+	// small POOL: hundreds of bugs cannot each hold a looping voice, so
+	// UKBSwarmAudioComponent binds a handful of emitters to whichever bugs are nearest the
+	// listener. MoveSoundRadius is therefore a hearing distance, not a per-bug property.
+
+	/**
+	 * Looped while this bug is one of the nearest to the listener.
+	 *
+	 * Should be a LOOPING source. UKBSwarmAudioComponent re-plays a stopped emitter, but a
+	 * one-shot will simply restart each time it does, which is audible as a stutter rather
+	 * than a bed.
+	 *
+	 * Leave unset and this archetype is silent while moving - it still takes an emitter slot,
+	 * so an archetype with no sound does not crowd out one that has.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio")
+	TSoftObjectPtr<USoundBase> MoveSound;
+
+	/** Gain for MoveSound at zero distance, before the falloff to MoveSoundRadius. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "0.0"))
+	float MoveSoundVolume = 0.6f;
+
+	/**
+	 * How far (cm) this bug can be from the listener before its movement sound goes silent.
+	 *
+	 * The falloff is linear from 1.0 at the bug's position to 0 here, applied by the component
+	 * rather than by a USoundAttenuation: the project has no attenuation assets, and a shared
+	 * curve would have to be authored before a single bug could be heard.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "1.0"))
+	float MoveSoundRadius = 1800.f;
+
+	/**
+	 * Pitch is rolled once per emitter BINDING, not per frame.
+	 *
+	 * A swarm playing one sound in lockstep reads as a single loud insect; the spread is what
+	 * makes it read as a crowd. Rolling per frame instead would warble.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "0.01"))
+	float MoveSoundPitchMin = 0.85f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "0.01"))
+	float MoveSoundPitchMax = 1.15f;
+
+	/**
+	 * One-shot played where this bug died, by UKBGoreComponent::OnBugDied.
+	 *
+	 * Budgeted separately from the movement emitters and from the Niagara burst: a wave ending
+	 * removes hundreds of bugs in a single frame, and hundreds of simultaneous voices is a
+	 * worse failure than hundreds of simultaneous particles.
+	 *
+	 * Leave unset and this archetype's deaths are silent.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio")
+	TSoftObjectPtr<USoundBase> DeathSound;
+
+	/** Gain for DeathSound at zero distance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "0.0"))
+	float DeathSoundVolume = 1.f;
+
+	/** Pitch spread, so a wave of deaths is a chorus rather than one sound played N times. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "0.01"))
+	float DeathSoundPitchMin = 0.9f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Audio", meta = (ClampMin = "0.01"))
+	float DeathSoundPitchMax = 1.1f;
 
 	// ---- Classification -----------------------------------------------------------------
 

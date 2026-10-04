@@ -83,6 +83,16 @@ def make_archetype(asset_name, mesh_path, material_path, **properties):
         else:
             warn("could not load anim data {}".format(anim_data_path))
 
+    # Same reason as anim_data_path: the generic loop below would hand set_editor_property a
+    # path string where a TSoftObjectPtr is wanted.
+    death_effect_path = properties.pop("death_effect_path", None)
+    if death_effect_path:
+        death_effect = load_asset(death_effect_path)
+        if death_effect is not None:
+            asset.set_editor_property("death_effect", death_effect)
+        else:
+            warn("could not load death effect {}".format(death_effect_path))
+
     for key, value in properties.items():
         if value is None:
             # An enum that could not be resolved; leave the property at its C++ default
@@ -151,6 +161,11 @@ BUG_MESH_YAW_OFFSET = 180.0
 ENEMY_MAT = "/Game/KillBugs/Enemies/M_KBEnemy"
 TINT_PARAM = "Base Color"
 
+# The burst every archetype plays where it died, spawned by UKBGoreComponent::OnBugDied. One
+# system covers all three: the per-archetype difference is User.SplatColor and User.SplatScale,
+# which the gore component writes at spawn rather than needing a system per bug type.
+DEATH_EFFECT = "/Game/KillBugs/VFX/FX_BugBlast"
+
 # --- Resolve the reflected types defensively -------------------------------------------
 # The exact Python names for game-module enums are not guaranteed, and a missing attribute
 # here is a hard crash at import time. Resolve them, report what was found, and carry on
@@ -188,6 +203,7 @@ TIER_INSTANCED = enum_member("KBRenderTier", "EKBRenderTier", members=("INSTANCE
 make_archetype(
     "DA_Bug_Grunt", BUG_MESH, BUG_MATERIAL,
     anim_data_path=BUG_ANIM_DATA,
+    death_effect_path=DEATH_EFFECT,
     mesh_yaw_offset=BUG_MESH_YAW_OFFSET,
     display_name=unreal.Text("Grunt"),
     mesh_scale=unreal.Vector(0.78, 0.78, 0.78),
@@ -207,6 +223,7 @@ make_archetype(
 make_archetype(
     "DA_Bug_Runner", BUG_MESH, BUG_MATERIAL,
     anim_data_path=BUG_ANIM_DATA,
+    death_effect_path=DEATH_EFFECT,
     mesh_yaw_offset=BUG_MESH_YAW_OFFSET,
     display_name=unreal.Text("Runner"),
     mesh_scale=unreal.Vector(0.52, 0.52, 0.52),
@@ -226,6 +243,7 @@ make_archetype(
 make_archetype(
     "DA_Bug_Brute", BUG_MESH, BUG_MATERIAL,
     anim_data_path=BUG_ANIM_DATA,
+    death_effect_path=DEATH_EFFECT,
     mesh_yaw_offset=BUG_MESH_YAW_OFFSET,
     display_name=unreal.Text("Brute"),
     mesh_scale=unreal.Vector(1.58, 1.58, 1.58),

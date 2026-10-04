@@ -8,6 +8,7 @@
 class UKBEnemyArchetype;
 class UKBEnemyVisualizerComponent;
 class UKBGoreComponent;
+class UKBSwarmAudioComponent;
 class AKBPlayerState;
 
 /**
@@ -129,6 +130,12 @@ public:
 	 */
 	UKBGoreComponent* GetGoreComponent() const { return Gore; }
 
+	/**
+	 * Where the bugs are actually being DRAWN. Read by the swarm audio component, which has to
+	 * follow the interpolated position rather than the replicated one - see GetViews.
+	 */
+	UKBEnemyVisualizerComponent* GetVisualizer() const { return Visualizer; }
+
 	// ---- Console commands (public so the delegates can bind) -----------------------------
 
 	// FConsoleCommandWithWorldAndArgsDelegate takes only (Args, World) - there is no
@@ -146,6 +153,13 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "KillBugs|Swarm")
 	TObjectPtr<UKBGoreComponent> Gore;
+
+	/**
+	 * Bug movement sound. The third sibling, and the one that is purely local: the visualizer
+	 * says where the bugs are drawn, and this turns the nearest few into voices.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "KillBugs|Swarm")
+	TObjectPtr<UKBSwarmAudioComponent> SwarmAudio;
 
 	/**
 	 * Bug types. Populated from the generated archetype assets in the constructor so Phase 2

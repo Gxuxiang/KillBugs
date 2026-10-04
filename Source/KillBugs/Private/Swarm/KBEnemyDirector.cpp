@@ -12,6 +12,7 @@
 #include "Net/UnrealNetwork.h"
 #include "Swarm/KBGoreComponent.h"
 #include "Swarm/KBEnemyVisualizerComponent.h"
+#include "Swarm/KBSwarmAudioComponent.h"
 #include "UObject/ConstructorHelpers.h"
 
 DEFINE_STAT(STAT_KB_SwarmSim);
@@ -50,6 +51,13 @@ AKBEnemyDirector::AKBEnemyDirector()
 	// between them is a single call when a bug stops being drawn.
 	Gore = CreateDefaultSubobject<UKBGoreComponent>(TEXT("Gore"));
 	Gore->SetupAttachment(SceneRoot);
+
+	// Bug movement sound. A third sibling for the same reason the gore component is a sibling
+	// of the visualizer: it reads the visualizer's views and owns its own budget, and there is
+	// nothing between them but that read. It has its own tick group, which is what lets it run
+	// on a client - this actor's own Tick is authority-gated and returns immediately there.
+	SwarmAudio = CreateDefaultSubobject<UKBSwarmAudioComponent>(TEXT("SwarmAudio"));
+	SwarmAudio->SetupAttachment(SceneRoot);
 
 	// One actor replicates the whole swarm, so it must never be culled for relevancy and
 	// never go dormant - dormancy would stop the fast array from being sent at all.
@@ -114,7 +122,17 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 			// Player health rides along with the swarm stats on purpose: while tuning contact
 			// damage, "is the swarm actually threatening?" is the question you are asking, and
 			// a bug count alone cannot answer it.
+			//
+			// The player's POSITION rides along for the same class of reason: several things move
+			// the pawn rather than the player (weapon recoil, and later whatever else shoves
+			// them), and a headless run has no other way to say where the pawn ended up. Without
+			// this the only position readout is the bullet-spawn diagnostic, which stops after ten
+			// shots - far too early to watch a push settle, and it reads the position of whoever
+			// fired rather than of the player.
 			float HealthPercent = -1.f;
+			FVector PlayerLocation = FVector::ZeroVector;
+			bool bHasPlayerLocation = false;
+
 			if (const UWorld* PerfWorld = GetWorld())
 			{
 				for (FConstPlayerControllerIterator It = PerfWorld->GetPlayerControllerIterator(); It; ++It)
@@ -126,6 +144,9 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 						continue;
 					}
 
+					PlayerLocation = Pawn->GetActorLocation();
+					bHasPlayerLocation = true;
+
 					if (const UKBStatSheetComponent* Stats = Pawn->FindComponentByClass<UKBStatSheetComponent>())
 					{
 						HealthPercent = Stats->GetHealthFraction() * 100.f;
@@ -136,11 +157,16 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 
 			const double Frames = FMath::Max(PerfFrames, 1);
 			UE_LOG(LogKillBugs, Display,
-				TEXT("Swarm perf | %d bugs | sim %.3f ms | net %.3f ms | health %.0f%% | %.0f fps"),
+				TEXT("Swarm perf | %d bugs | sim %.3f ms | net %.3f ms | health %.0f%% | ")
+				TEXT("player (%s) | %.0f fps"),
 				Sim.Num(),
 				PerfSimSeconds / Frames * 1000.0,
 				PerfNetSeconds / Frames * 1000.0,
 				HealthPercent,
+				bHasPlayerLocation
+					? *FString::Printf(TEXT("%.0f,%.0f,%.0f"),
+					                   PlayerLocation.X, PlayerLocation.Y, PlayerLocation.Z)
+					: TEXT("none"),
 				Frames / PerfElapsed);
 
 			PerfSimSeconds = 0.0;
@@ -608,7 +634,24 @@ bool AKBEnemyDirector::ApplyDamageToEnemy(int32 SimIndex, float Damage, AKBPlaye
 		if (const UKBEnemyArchetype* Archetype =
 			Archetypes.IsValidIndex(Enemy.ArchetypeIndex) ? Archetypes[Enemy.ArchetypeIndex].Get() : nullptr)
 		{
-			Killer->AddXP(Archetype->XpValue);
+			// The killer's own XP multiplier, not the archetype's raw value.
+			//
+			// This multiplier was already folded into the stat sheet and exposed as
+			// GetXpMultiplier(), but nothing ever called it - so the card that grants +15% XP
+			// was a card that did nothing at all. Read at the moment of the kill rather than
+			// cached, for the same reason weapons read the damage multiplier at fire time: a
+			// card picked mid-run should change the very next kill.
+			float XpMultiplier = 1.f;
+			if (const APawn* KillerPawn = Killer->GetPawn())
+			{
+				if (const UKBStatSheetComponent* KillerStats =
+					KillerPawn->FindComponentByClass<UKBStatSheetComponent>())
+				{
+					XpMultiplier = KillerStats->GetXpMultiplier();
+				}
+			}
+
+			Killer->AddXP(FMath::RoundToInt(Archetype->XpValue * XpMultiplier));
 			Killer->AddGold(Archetype->GoldValue);
 		}
 	}
