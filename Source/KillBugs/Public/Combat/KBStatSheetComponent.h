@@ -42,6 +42,14 @@ public:
 	float GetHealthFraction() const;
 
 	/**
+	 * Shakes the hurt player's camera, if a shake is configured.
+	 *
+	 * A no-op unless UKBGameSettings::PlayerDamageCameraShake is set, which it is not by default.
+	 * Kept apart from ApplyDamage so the health maths reads as health maths.
+	 */
+	void PlayDamageCameraShake() const;
+
+	/**
 	 * Server-only. Returns the damage actually applied.
 	 *
 	 * Broadcasts OnHealthDepleted when this brings the player to zero. The stat sheet does not

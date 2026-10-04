@@ -2,6 +2,8 @@
 
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "KBGameSettings.h"
 #include "Net/UnrealNetwork.h"
 
@@ -56,6 +58,13 @@ float UKBStatSheetComponent::ApplyDamage(float Damage)
 	const float Applied = FMath::Min(Damage, CurrentHealth);
 	CurrentHealth -= Applied;
 
+	// Only for damage that actually landed. A hit on an already-empty health bar applies zero,
+	// and shaking for it would make the shake outlast the player's life.
+	if (Applied > 0.f)
+	{
+		PlayDamageCameraShake();
+	}
+
 	if (CurrentHealth <= 0.f)
 	{
 		CurrentHealth = 0.f;
@@ -63,6 +72,38 @@ float UKBStatSheetComponent::ApplyDamage(float Damage)
 	}
 
 	return Applied;
+}
+
+void UKBStatSheetComponent::PlayDamageCameraShake() const
+{
+	const UKBGameSettings& Settings = UKBGameSettings::Get();
+
+	// Unset by default: this is the hook for a shake asset, not a shake. See the tooltip on
+	// UKBGameSettings::PlayerDamageCameraShake.
+	if (!Settings.PlayerDamageCameraShake || Settings.PlayerDamageShakeScale <= 0.f)
+	{
+		return;
+	}
+
+	// The controller is what owns a camera, so no controller means nothing to shake: an enemy
+	// pawn, or the brief window before a player's pawn is possessed.
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	APlayerController* PlayerController =
+		Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+
+	if (!PlayerController)
+	{
+		return;
+	}
+
+	// This runs on the SERVER - ApplyDamage refuses to do anything else - and
+	// ClientStartCameraShake is a Client RPC, so calling it here is precisely what routes the
+	// shake to the machine that owns the camera. Nothing has to be replicated by hand, and on a
+	// listen server the host's own controller simply executes it locally.
+	//
+	// Unreliable by design: a dropped hit shake is a cosmetic miss, not a desync.
+	PlayerController->ClientStartCameraShake(Settings.PlayerDamageCameraShake,
+	                                         Settings.PlayerDamageShakeScale);
 }
 
 void UKBStatSheetComponent::Heal(float Amount)
