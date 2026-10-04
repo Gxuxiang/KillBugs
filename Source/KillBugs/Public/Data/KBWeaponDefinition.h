@@ -130,6 +130,23 @@ public:
 		meta = (ToolTip = "这把武器的主题色。\n\n目前实际用途只有冲击波范围圈的绘制（调试用）。子弹本身的颜色由 KBGameSettings 里的 ProjectileTint 统一控制——要让每把武器有不同弹色，需要给子弹材质加逐实例颜色支持。"))
 	FLinearColor TracerColor = FLinearColor(1.f, 0.85f, 0.3f);
 
+	// ---- Feel --------------------------------------------------------------------------
+
+	/**
+	 * How far firing pushes the SHOOTER backwards, in cm. 0 disables recoil entirely.
+	 *
+	 * The pawn, not the camera: this game's camera is a fixed top-down boom with
+	 * absolute rotation, so a "camera kick" would mean sliding the whole view, which reads as
+	 * the world moving rather than as the gun pushing back. Moving the character is the honest
+	 * version, and it is the shooter who should feel it.
+	 *
+	 * Per weapon on purpose. Recoil is what makes a heavy weapon read as heavy, and a value
+	 * shared across every gun would make the shotgun and the rifle feel identical.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "手感|后坐力",
+		meta = (ToolTip = "后坐力：开火时把玩家自己朝瞄准的反方向推多远（厘米）。0 = 关闭。\n\n推的是角色本体（服务端施力，自动复制），不是相机——本作相机是锁死的顶视，晃相机等于整个画面在动。\n\n这是【贴地时】的距离，由角色的 BrakingDecelerationWalking 刹停算出。\n按住移动键时推不到这么远，那个“推不动”是对的，没有补偿。\n【腾空开火会滑得远得多】：空中没有行走刹车，实测 300 的设定在跳跃中会滑出 627，落地才停。", ClampMin = "0.0", UIMax = "600.0"))
+	float RecoilDistance = 0.f;
+
 	/** Played at the muzzle on every shot. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "表现|开火",
 		meta = (ToolTip = "开火音效。每次扣扳机时在枪口位置播放（一次扣扳机播一次，不是每颗弹丸各播一次）。\n\n目前只在开火的那台机器上播放（单机没问题）。联机时其他玩家听不到，这个要等 Phase 5 用复制的开火事件补齐。"))

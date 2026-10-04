@@ -116,7 +116,27 @@ protected:
 
 	void TickAutoWeapons();
 	bool FireAtAcquiredTarget(const UKBWeaponDefinition& Definition, int32 WeaponLevel,
-	                          int32 TargetIndex, const FVector& TargetLocation);
+	                          int32 TargetIndex, const FVector& TargetLocation, int32 SlotIndex);
+
+	/**
+	 * Plays the weapon's muzzle effect and fire sound on EVERY machine.
+	 *
+	 * Unreliable on purpose, and for the same reason the shot itself is: a dropped muzzle flash
+	 * is a cosmetic miss, and paying for reliability on every bullet would cost far more than the
+	 * occasional missing flash is worth.
+	 *
+	 * The SLOT INDEX crosses the wire, not the weapon asset. A UObject that does not replicate
+	 * cannot be an RPC parameter - the engine warns and sends null - and UKBWeaponDefinition is a
+	 * DataAsset, so it never replicates. Every client already has the shooter's replicated
+	 * Weapons array, so an index is enough for each machine to resolve the same definition.
+	 *
+	 * Called from the moment the shot is committed, before the delivery switch, so all three
+	 * delivery types get feedback. It used to live inside the projectile path, which is why a
+	 * radial weapon (the Shockwave) has never had a muzzle flash or a fire sound.
+	 */
+	UFUNCTION(NetMulticast, Unreliable)
+	void MulticastPlayFireFeedback(int32 SlotIndex, FVector_NetQuantize MuzzleLocation,
+	                               FVector_NetQuantizeNormal Direction);
 
 	/**
 	 * Launches one shot's worth of projectiles, applying the weapon's cone spread.
@@ -134,6 +154,19 @@ protected:
 	 */
 	void PlayFireFeedback(const UKBWeaponDefinition& Definition, const FVector& Start,
 	                      const FVector& Direction);
+
+	/**
+	 * Pushes the shooter backwards along their own aim, if the weapon asks for it.
+	 *
+	 * Takes the fire direction rather than reading the pawn's facing: the auto path aims at an
+	 * acquired bug and the manual path at a cursor point, and neither is necessarily where the
+	 * character happens to be pointing.
+	 *
+	 * Server-side only, because that is where both fire paths run - which also makes it correct
+	 * in multiplayer for free: the character movement component replicates the velocity, so the
+	 * owning client sees its own pawn shoved back without a message being written for it.
+	 */
+	void ApplyRecoil(const UKBWeaponDefinition& Definition, const FVector& FireDirection);
 
 	/**
 	 * Cached rather than searched per frame. The director is spawned once at run start and

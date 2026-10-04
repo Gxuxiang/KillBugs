@@ -5,6 +5,8 @@
 #include "KBGameSettings.generated.h"
 
 class USoundBase;
+class UNiagaraSystem;
+class UCameraShakeBase;
 
 /**
  * Every global tuning value in one place, editable in Project Settings -> Game -> KillBugs.
@@ -152,6 +154,67 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "战斗|子弹",
 		meta = (ToolTip = "所有子弹的颜色。\n\n目前全局统一，不分武器——弹体共用一个材质实例。要做到每把武器不同颜色，需要给子弹材质加逐实例颜色支持。"))
 	FLinearColor ProjectileTint = FLinearColor(1.f, 0.82f, 0.25f, 1.f);
+
+	UPROPERTY(Config, EditAnywhere, Category = "战斗|子弹",
+		meta = (ToolTip = "飞行物的特效（Niagara）。\n\n每颗在飞的子弹挂一个该系统并跟着它移动，命中或超程时销毁。\n【留空则退回默认球体】——球体只是占位，不参与碰撞，换成特效不影响命中判定。\n\n注意霰弹一次打 6 颗，会同时有 6 个系统在跑。\n\n组件必须挂在 AKBProjectileDirector 上——因为那个类没有蓝图子类，属性放它身上在编辑器里根本改不了，所以和 ProjectileTint 一样放在这里。"))
+	TSoftObjectPtr<UNiagaraSystem> ProjectileEffect;
+
+	// =====================================================================================
+	// 救援
+	// =====================================================================================
+
+	UPROPERTY(Config, EditAnywhere, Category = "战斗|救援",
+		meta = (ToolTip = "救助圈的半径（厘米）。队友进入这个圈才开始读条。\n\n也是倒地玩家在画面上看到的那个圈的半径——代码和显示用的是同一个值，不会对不上。", ClampMin = "50.0", UIMax = "1000.0"))
+	float RescueRadius = 220.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "战斗|救援",
+		meta = (ToolTip = "救助需要站多久（秒）。\n\n【中途离开圈要重新计时】——这是有意的，和撤离的“暂停”相反：撤离去凑齐四个人本来就难，\n救一个人却松手就该付代价。", ClampMin = "0.5", UIMax = "30.0"))
+	float RescueSeconds = 4.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "战斗|救援",
+		meta = (ToolTip = "被救起来时回复到最大血量的百分之多少。\n\n0.5 = 一半。调高会让倒地的代价变轻。", ClampMin = "0.05", ClampMax = "1.0"))
+	float ReviveHealthFraction = 0.5f;
+
+	// =====================================================================================
+	// 局末结算
+	// =====================================================================================
+
+	UPROPERTY(Config, EditAnywhere, Category = "波次|局末",
+		meta = (ToolTip = "一局结束（团灭或撤离成功）后，结算界面停留多久才回大厅。\n\n不能太短：这段时间玩家在读自己这局赚了多少，而且这是全队唯一的“战绩”展示。\n到点后所有人一起回大厅，不能跳过——联机下让某个人按继续会把其他人留在原地。", ClampMin = "3.0", UIMax = "60.0"))
+	float RunSummarySeconds = 12.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "波次|局末",
+		meta = (ToolTip = "升级所需的经验基准值。第 N 级升到 N+1 级需要 XpPerLevel × N 点经验，\n所以前几级来得很密、后面越来越慢（总经验 = XpPerLevel × N(N-1)/2）。\n\n调大 = 升级变慢。这会影响卡牌的等级门槛能多早解锁。", ClampMin = "1", UIMax = "2000"))
+	int32 XpPerLevel = 100;
+
+	// =====================================================================================
+	// 受伤反馈
+	// =====================================================================================
+
+	/**
+	 * Camera shake played on the machine of the player who was hurt.
+	 *
+	 * UNSET by default, and this is the hook for one: create a UCameraShakeBase asset and drop it
+	 * in here (Project Settings -> Game -> KillBugs, or the matching key in
+	 * Config/DefaultGame.ini). Nothing else needs changing - UKBStatSheetComponent already looks
+	 * this up on every hit.
+	 *
+	 * A class rather than an instance, because that is what ClientStartCameraShake takes and the
+	 * shake is spawned per hit rather than held.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "战斗|受伤反馈",
+		meta = (ToolTip = "玩家受伤时的摄像机震动（UCameraShakeBase 类）。\n\n【留空则完全不震】—— 本工程目前没有任何震屏资产，这一项就是给你挂资产的位置。\n在 Project Settings › Game › KillBugs › 战斗|受伤反馈 里设置，或直接写进 DefaultGame.ini。\n\n挂上之后不需要改任何代码：受伤的收口在 UKBStatSheetComponent::ApplyDamage。"))
+	TSubclassOf<UCameraShakeBase> PlayerDamageCameraShake;
+
+	/**
+	 * Multiplier on the shake above, so intensity can be dialled without editing the asset.
+	 *
+	 * Separate from the asset's own scale on purpose: "a bit less" is the single most common
+	 * tweak to a hit shake, and doing it here is an ini edit rather than opening the editor.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "战斗|受伤反馈",
+		meta = (ToolTip = "上面那个震动的强度倍率。\n\n存在意义是「太强了，调小一点」不用去改资产——改这个数字就行，不用重编译。\n0 = 关闭（等同于留空）。", ClampMin = "0.0", UIMax = "3.0"))
+	float PlayerDamageShakeScale = 1.f;
 
 	// =====================================================================================
 	// 死亡表现

@@ -7,6 +7,7 @@
 #include "Data/KBWeaponDefinition.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/Pawn.h"
 #include "KillBugs.h"
@@ -240,8 +241,13 @@ void UKBWeaponInventoryComponent::TickAutoWeapons()
 
 	const FVector Origin = Pawn->GetActorLocation();
 
-	for (FKBOwnedWeapon& Weapon : Weapons)
+	// Indexed rather than ranged-for: the slot is what identifies the weapon to the clients when
+	// the muzzle feedback is multicast, and the definition itself cannot cross the wire (see
+	// MulticastPlayFireFeedback).
+	for (int32 SlotIndex = 0; SlotIndex < Weapons.Num(); ++SlotIndex)
 	{
+		FKBOwnedWeapon& Weapon = Weapons[SlotIndex];
+
 		const UKBWeaponDefinition* Definition = Weapon.Definition;
 		if (!Definition || Definition->Behavior != EKBWeaponBehavior::Auto)
 		{
@@ -263,13 +269,13 @@ void UKBWeaponInventoryComponent::TickAutoWeapons()
 		const UKBStatSheetComponent* Stats = ResolveStatSheet();
 		Weapon.CooldownRemaining = Definition->GetCooldown(Weapon.Level) * (Stats ? Stats->GetCooldownMultiplier() : 1.f);
 		Weapon.LastFireServerTime = GetServerTimeNow();
-		FireAtAcquiredTarget(*Definition, Weapon.Level, TargetIndex, TargetLocation);
+		FireAtAcquiredTarget(*Definition, Weapon.Level, TargetIndex, TargetLocation, SlotIndex);
 	}
 }
 
 bool UKBWeaponInventoryComponent::FireAtAcquiredTarget(const UKBWeaponDefinition& Definition,
                                                        int32 WeaponLevel, int32 TargetIndex,
-                                                       const FVector& TargetLocation)
+                                                       const FVector& TargetLocation, int32 SlotIndex)
 {
 	AKBEnemyDirector* Director = ResolveDirector();
 	if (!Director)
@@ -287,6 +293,26 @@ bool UKBWeaponInventoryComponent::FireAtAcquiredTarget(const UKBWeaponDefinition
 	const APawn* Pawn = Cast<APawn>(GetOwner());
 	const FVector MuzzleLocation = Pawn ? Pawn->GetActorLocation() : TargetLocation;
 
+	// Normalised before it goes any further. This is a muzzle-to-target DELTA at this point,
+	// hundreds of units long, and the spread rotates it without rescaling. The manual path
+	// normalises here for the same reason.
+	//
+	// Computed for EVERY delivery rather than inside the projectile branch: recoil is a property
+	// of pulling the trigger, not of what the trigger happens to launch, so a radial or hitscan
+	// weapon set to kick should kick identically.
+	FVector Direction = TargetLocation - MuzzleLocation;
+	Direction.Z = 0.f;
+	const bool bHasDirection = Direction.Normalize();
+
+	if (bHasDirection)
+	{
+		ApplyRecoil(Definition, Direction);
+
+		// Muzzle flash and fire sound, on every machine - before the switch, so a radial or
+		// hitscan weapon is heard too. This used to be called from the projectile path alone.
+		MulticastPlayFireFeedback(SlotIndex, MuzzleLocation, Direction);
+	}
+
 	switch (Definition.Delivery)
 	{
 	case EKBWeaponDelivery::Projectile:
@@ -296,18 +322,12 @@ bool UKBWeaponInventoryComponent::FireAtAcquiredTarget(const UKBWeaponDefinition
 			return false;
 		}
 
-		// No tracer recorded: the bullets ARE the visual. Drawing both would double up.
-		//
-		// Normalised before it goes any further. This is a muzzle-to-target DELTA at this
-		// point, hundreds of units long, and the spread rotates it without rescaling. The
-		// manual path normalises here for the same reason.
-		FVector Direction = TargetLocation - MuzzleLocation;
-		Direction.Z = 0.f;
-		if (!Direction.Normalize())
+		if (!bHasDirection)
 		{
 			return false; // target directly on the muzzle; nothing sensible to shoot at
 		}
 
+		// No tracer recorded: the bullets ARE the visual. Drawing both would double up.
 		FireProjectileSpread(Definition, MuzzleLocation, Direction, Damage, Killer);
 		return true;
 	}
@@ -334,7 +354,10 @@ void UKBWeaponInventoryComponent::FireProjectileSpread(const UKBWeaponDefinition
 		return;
 	}
 
-	PlayFireFeedback(Definition, Start, Direction);
+	// NOTE: the muzzle feedback is NOT played here any more. It moved up to the two places a shot
+	// is committed (FireAtAcquiredTarget and TryFireManualWeapon), so that it fires once per
+	// trigger pull and covers the radial and hitscan delivery types too. Playing it here as well
+	// would play each shot's flash and sound twice.
 
 	// Resolved once per shot rather than per pellet: a shotgun fires six of them.
 	UNiagaraSystem* ImpactEffect = Definition.ImpactEffect.LoadSynchronous();
@@ -382,6 +405,32 @@ void UKBWeaponInventoryComponent::FireProjectileSpread(const UKBWeaponDefinition
 	                      ImpactEffect, ImpactSound);
 }
 
+void UKBWeaponInventoryComponent::MulticastPlayFireFeedback_Implementation(
+	int32 SlotIndex, FVector_NetQuantize MuzzleLocation, FVector_NetQuantizeNormal Direction)
+{
+	// Resolved from this machine's own copy of the shooter's replicated weapons, which is what
+	// makes an index sufficient - see the note on the declaration.
+	if (!Weapons.IsValidIndex(SlotIndex) || !Weapons[SlotIndex].Definition)
+	{
+		return;
+	}
+
+	// First few shots only, and the licence for it is the same as the bullet-spawn diagnostic
+	// next door: a sound cannot be asserted on and a headless run cannot hear one, so without a
+	// line here "the client's gun is silent" is indistinguishable from "the client never
+	// received the shot". This is the only client-side evidence that exists.
+	static int32 DiagnosticCalls = 0;
+	if (DiagnosticCalls < 10)
+	{
+		++DiagnosticCalls;
+		UE_LOG(LogKillBugs, Display, TEXT("FireFeedback: %s for slot %d (%s)"),
+			GetOwner() && GetOwner()->HasAuthority() ? TEXT("server") : TEXT("CLIENT"),
+			SlotIndex, *GetNameSafe(Weapons[SlotIndex].Definition));
+	}
+
+	PlayFireFeedback(*Weapons[SlotIndex].Definition, MuzzleLocation, Direction);
+}
+
 void UKBWeaponInventoryComponent::PlayFireFeedback(const UKBWeaponDefinition& Definition,
                                                    const FVector& Start, const FVector& Direction)
 {
@@ -406,6 +455,91 @@ void UKBWeaponInventoryComponent::PlayFireFeedback(const UKBWeaponDefinition& De
 	{
 		UGameplayStatics::PlaySoundAtLocation(GetOwner(), Sound, Muzzle,
 			/*VolumeMultiplier*/ 1.f, /*PitchMultiplier*/ Definition.FireSoundPitch);
+	}
+}
+
+void UKBWeaponInventoryComponent::ApplyRecoil(const UKBWeaponDefinition& Definition,
+                                              const FVector& FireDirection)
+{
+	if (Definition.RecoilDistance <= 0.f)
+	{
+		return;
+	}
+
+	AKBCharacter* Character = Cast<AKBCharacter>(GetOwner());
+	UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+	if (!Movement)
+	{
+		return;
+	}
+
+	// Aim can be straight at the pawn's own centre if the cursor is on top of the character, in
+	// which case there is no direction to be pushed away from.
+	FVector Backwards = -FireDirection;
+	Backwards.Z = 0.f;
+	if (!Backwards.Normalize())
+	{
+		return;
+	}
+
+	// RecoilDistance is a DISTANCE, because that is what it means to the person tuning it, and
+	// the launch is a SPEED, because that is what the movement component takes. Converting:
+	// d = v^2 / (2a) for a constant deceleration, so v = sqrt(2 * a * d).
+	//
+	// a is the character's own BrakingDecelerationWalking, read rather than assumed, so retuning
+	// the movement makes this stay honest instead of quietly drifting.
+	//
+	// The player holding a movement key will not travel the full distance - their input fights
+	// the push. That is the correct behaviour and is deliberately not compensated for: being able
+	// to lean into the recoil is a skill, and levelling it out would take that away.
+	//
+	// The same is true, much more strongly, while AIRBORNE: walking braking does not apply in
+	// the air, so nothing opposes the push at all and the shooter keeps the full speed until they
+	// land. Measured headlessly, a 300cm setting travelled 627cm when fired mid-fall (the headless
+	// pawn is still dropping from its spawn point at the moment a startup command fires it). That
+	// is the honest physics rather than a bug - a shove in mid-air should carry - but it means the
+	// number is a ground figure, and it is documented as one on the property.
+	const float Deceleration = FMath::Max(Movement->BrakingDecelerationWalking, 1.f);
+	const float Speed = FMath::Sqrt(2.f * Deceleration * Definition.RecoilDistance);
+
+	// Written straight into the movement component's velocity, NOT through
+	// ACharacter::LaunchCharacter.
+	//
+	// LaunchCharacter is the obvious call and it was the first attempt, but
+	// UCharacterMovementComponent::HandlePendingLaunch sets MOVE_Falling as well as the velocity
+	// (engine source, CharacterMovementComponent.cpp:1237). Falling applies no walking braking,
+	// so the shooter coasts the entire airborne stretch at full speed and then brakes on landing
+	// on top of that - a 300cm setting was measured travelling 627cm across the arena, roughly
+	// double. It also leaves the shooter briefly ungrounded, which is not what "the gun pushed
+	// me" should feel like.
+	//
+	// Assigning Velocity rather than using AddImpulse is deliberate too: this REPLACES the
+	// horizontal velocity instead of adding to it, so every shot moves the shooter the same
+	// predictable distance. Adding would let a player running at the target absorb the whole
+	// push, and the same weapon would kick differently depending on which way they were walking.
+	//
+	// Both are server-side writes to a client-owned pawn's velocity, which is the same contract
+	// LaunchCharacter and AddImpulse have: the movement component's normal correction carries it
+	// to the owning client.
+	Movement->Velocity = Backwards * Speed;
+
+	// Keeps the scene component's cached velocity in step, which the movement component
+	// normally maintains for it - writing Velocity directly bypasses that.
+	Movement->UpdateComponentVelocity();
+
+	// First ten only, the same shape as the bullet-spawn diagnostic in AKBProjectileDirector.
+	// A headless run has no mouse, so this line is the only evidence that a manual weapon's
+	// recoil was applied at all - but it happens once a second in normal play and there is no
+	// reason to keep paying for it after the first few confirm it works.
+	static int32 DiagnosticRecoils = 0;
+	if (DiagnosticRecoils < 10)
+	{
+		++DiagnosticRecoils;
+		UE_LOG(LogKillBugs, Display,
+			TEXT("Recoil #%d: %.0fcm -> %.0f cm/s away from (%.2f,%.2f); pawn at (%.0f,%.0f)"),
+			DiagnosticRecoils, Definition.RecoilDistance, Speed,
+			FireDirection.X, FireDirection.Y,
+			Character->GetActorLocation().X, Character->GetActorLocation().Y);
 	}
 }
 
@@ -576,6 +710,16 @@ bool UKBWeaponInventoryComponent::TryFireManualWeapon(int32 SlotIndex, const FVe
 
 	// The client sent a point; the server decides what is actually along that line.
 	const FVector End = Start + Direction * Definition->Range;
+
+	// The shotgun's recoil rides on this path. The push has to happen after the cooldown is
+	// known to be clear - a shot that was refused must not shove the player - and before the
+	// shot resolves, so the shooter is already moving when the pellets leave.
+	ApplyRecoil(*Definition, Direction);
+
+	// Muzzle flash and fire sound, on every machine. This is the path a client's own shot takes:
+	// the client sends a point, the server re-derives the direction and fires, and without this
+	// the shooter's own screen was the one place in the game that never heard their gun.
+	MulticastPlayFireFeedback(SlotIndex, Start, Direction);
 
 	const UKBStatSheetComponent* Stats = ResolveStatSheet();
 	Weapon.CooldownRemaining = Definition->GetCooldown(Weapon.Level) * (Stats ? Stats->GetCooldownMultiplier() : 1.f);

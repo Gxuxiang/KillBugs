@@ -5,6 +5,7 @@
 #include "KBProjectileDirector.generated.h"
 
 class UInstancedStaticMeshComponent;
+class UNiagaraComponent;
 class UNiagaraSystem;
 class USoundBase;
 class AKBEnemyDirector;
@@ -32,6 +33,17 @@ struct FKBProjectile
 	/** Copied from the firing weapon so the impact can look right without a lookup. */
 	TSoftObjectPtr<UNiagaraSystem> ImpactEffect;
 	TSoftObjectPtr<USoundBase> ImpactSound;
+
+	/**
+	 * This bullet's own effect, when the director has one. Null means it is drawn as an
+	 * instanced sphere instead - see UpdateVisuals.
+	 *
+	 * A raw pointer in a plain struct, which is normally a lifetime hazard. It is safe here for
+	 * a specific reason: the component is created with this actor as its outer and registered,
+	 * so the actor's OwnedComponents holds the only reference that matters and the GC sees it.
+	 * This struct never outlives the actor.
+	 */
+	TObjectPtr<UNiagaraComponent> EffectComponent;
 
 	/**
 	 * Drawn but never resolved.
@@ -104,6 +116,14 @@ public:
 protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "KillBugs|Projectiles")
 	TObjectPtr<UStaticMesh> ProjectileMesh;
+
+	// The bullet's actual look is UKBGameSettings::ProjectileEffect, not a property here, for the
+	// same reason the tint is: this class has no Blueprint subclass, so an EditDefaultsOnly
+	// property on it would not be editable anywhere - it would look configurable and be
+	// unreachable. That field is also one shared system for every bullet rather than a per-weapon
+	// one, because a setting is the same on the client as on the server, so a client draws what
+	// the host draws with nothing replicated; a per-weapon effect would have to ride inside
+	// MulticastPlayShot, which is Unreliable and already carries a direction per pellet.
 
 	/**
 	 * NOT configurable on purpose. Each bullet is drawn at exactly its own hit radius, so the

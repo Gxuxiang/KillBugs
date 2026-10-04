@@ -9,7 +9,9 @@
 #include "KBGameSettings.h"
 #include "KillBugs.h"
 #include "Kismet/GameplayStatics.h"
+#include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "Materials/MaterialInterface.h"
 #include "Swarm/KBEnemyDirector.h"
 #include "UObject/ConstructorHelpers.h"
@@ -121,22 +123,15 @@ void AKBProjectileDirector::FireProjectile(const FVector& Start, const FVector& 
 		return; // degenerate direction; nothing sensible to shoot at
 	}
 
-	// First few shots only. Reports where the bullet actually starts relative to the shooter,
-	// which is the one thing that cannot be judged from the call site.
+	// Logged after the effect component is created (see the end of this function for the effect
+	// itself), reporting whether one was. "fx=no" against a ProjectileEffect set in the ini is
+	// the one failure that is otherwise completely invisible: the bullets still fly, the damage
+	// still lands, and only the look is wrong.
 	static int32 DiagnosticShots = 0;
-	if (DiagnosticShots < 10)
+	const bool bDiagnose = DiagnosticShots < 10;
+	if (bDiagnose)
 	{
 		++DiagnosticShots;
-		const FVector PawnLocation = InKiller && InKiller->GetPawn()
-			? InKiller->GetPawn()->GetActorLocation() : FVector::ZeroVector;
-		// The killer's index is the only thing that says WHICH player fired this. Position does
-		// not distinguish them: with one PlayerStart both pawns spawn on top of each other.
-		const AKBPlayerState* KillerState = InKiller;
-		UE_LOG(LogKillBugs, Display,
-			TEXT("Bullet #%d spawn=(%.0f,%.0f) shooterAt=(%.0f,%.0f) dir=(%.2f,%.2f) killer=%d"),
-			DiagnosticShots, Start.X, Start.Y, PawnLocation.X, PawnLocation.Y,
-			Heading.X, Heading.Y,
-			KillerState ? KillerState->GetKBPlayerIndex() : -1);
 	}
 
 	// Start just ahead of the shooter so the bolt visibly leaves the character instead of
@@ -154,6 +149,52 @@ void AKBProjectileDirector::FireProjectile(const FVector& Start, const FVector& 
 	Projectile.ImpactEffect = InImpactEffect;
 	Projectile.ImpactSound = InImpactSound;
 	Projectile.bCosmetic = bCosmetic;
+
+	// The bullet's own look. Built here rather than in UpdateVisuals so that every bullet owns
+	// its component from the frame it is born: UpdateVisuals runs after the simulation step, and
+	// a bullet created and destroyed inside one frame would otherwise never be drawn at all.
+	//
+	// LoadSynchronous is per shot, not cached at BeginPlay, so the property stays editable on
+	// the class while the game runs. On an asset already in memory it is a map lookup.
+	if (UNiagaraSystem* Effect = KBSettings().ProjectileEffect.LoadSynchronous())
+	{
+		UNiagaraComponent* Component = NewObject<UNiagaraComponent>(this);
+		Component->SetupAttachment(GetRootComponent());
+		Component->SetMobility(EComponentMobility::Movable);
+
+		// The effect is authored at its own size, NOT scaled to the hit radius the way the
+		// sphere is. The sphere had to be sized from the radius because a plain ball gives no
+		// other clue how big the hitbox is; a Niagara system is art, and stretching it to a
+		// number would fight whoever made it. Author it at roughly twice the weapon's HitRadius
+		// (rifle 18, shotgun 22) if it should read as the size of what it hits.
+		Component->SetAsset(Effect);
+
+		// Set through the setter: bAutoDestroy is private on UNiagaraComponent, because the
+		// engine wants to decide for itself whether a finished system is safe to collect.
+		// Off, because this component's lifetime is the bullet's, and Tick destroys it.
+		Component->SetAutoDestroy(false);
+
+		Component->RegisterComponent();
+		Component->SetWorldLocation(Projectile.Location);
+		Component->Activate();
+
+		Projectile.EffectComponent = Component;
+	}
+
+	if (bDiagnose)
+	{
+		const FVector PawnLocation = InKiller && InKiller->GetPawn()
+			? InKiller->GetPawn()->GetActorLocation() : FVector::ZeroVector;
+		// The killer's index is the only thing that says WHICH player fired this. Position does
+		// not distinguish them: with one PlayerStart both pawns spawn on top of each other.
+		const AKBPlayerState* KillerState = InKiller;
+		UE_LOG(LogKillBugs, Display,
+			TEXT("Bullet #%d spawn=(%.0f,%.0f) shooterAt=(%.0f,%.0f) dir=(%.2f,%.2f) killer=%d fx=%s"),
+			DiagnosticShots, Start.X, Start.Y, PawnLocation.X, PawnLocation.Y,
+			Heading.X, Heading.Y,
+			KillerState ? KillerState->GetKBPlayerIndex() : -1,
+			Projectile.EffectComponent ? TEXT("yes") : TEXT("no"));
+	}
 }
 
 void AKBProjectileDirector::FireShot(const FVector& Start, const TArray<FVector>& Directions,
@@ -245,6 +286,20 @@ void AKBProjectileDirector::Tick(float DeltaSeconds)
 		Projectile.Location += Step;
 		Projectile.RemainingRange -= StepLength;
 
+		// Moved here rather than in UpdateVisuals: this is the position the hit test just used,
+		// so the effect is drawn exactly where the bullet is - and where it is about to be
+		// tested from next frame. A frame of lag between the two is the one thing a bullet
+		// travelling 2600 units a second cannot hide.
+		if (Projectile.EffectComponent)
+		{
+			// Moving the component is only half of it: a Niagara system whose particles are
+			// simulated in WORLD space emits them at whatever point the component was at when
+			// they were born, and leaves them there. The bullet then reads as a puff at the
+			// muzzle - the component verifiably travels, the effect does not - and the fix is not
+			// here but on the emitter's Local Space flag.
+			Projectile.EffectComponent->SetWorldLocation(Projectile.Location);
+		}
+
 		bool bConsumed = false;
 
 		// Damage is the server's alone, and never for a cosmetic bullet: a client resolving
@@ -266,6 +321,15 @@ void AKBProjectileDirector::Tick(float DeltaSeconds)
 
 		if (bConsumed || Projectile.RemainingRange <= 0.f)
 		{
+			// Destroyed explicitly rather than left to the GC: a bullet dies hundreds of times a
+			// run, and a component per bullet waiting on a collection pass would accumulate for
+			// as long as the wave lasts. RemoveAtSwap then moves the last bullet into this slot,
+			// which is safe - its own component travels with it in the struct.
+			if (Projectile.EffectComponent)
+			{
+				Projectile.EffectComponent->DestroyComponent();
+			}
+
 			Projectiles.RemoveAtSwap(Index);
 		}
 	}
@@ -345,6 +409,13 @@ void AKBProjectileDirector::UpdateVisuals()
 
 	for (const FKBProjectile& Projectile : Projectiles)
 	{
+		// This bullet is drawn by its own effect. Adding an instance as well would put a sphere
+		// inside the effect, which is precisely what swapping to Niagara was meant to stop.
+		if (Projectile.EffectComponent)
+		{
+			continue;
+		}
+
 		// Drawn AT THE HITBOX SIZE, not at an arbitrary small size.
 		//
 		// A bullet much smaller than the radius it actually tests against reads as hitting
