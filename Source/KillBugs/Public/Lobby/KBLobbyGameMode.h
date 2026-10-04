@@ -60,4 +60,35 @@ protected:
 
 	/** Server only: the first player to arrive becomes the host. */
 	void ClaimHostIfUnclaimed(AKBPlayerState* NewPlayerState);
+
+	/**
+	 * How long the lobby is held up before the map change, so the loading screen is actually
+	 * seen.
+	 *
+	 * THIS DELAY IS THE FEATURE, not padding. The start used to call ServerTravel in the same
+	 * frame it handled the request, which tore the world down before a single frame could be
+	 * drawn: the click looked broken on every machine, and remote clients were never even told
+	 * it had been pressed. Setting a flag and travelling in the same breath does not fix that
+	 * either - the flag needs a net update to reach anyone, and there is no update after the
+	 * world is gone.
+	 *
+	 * Half a second is several updates at any sane lobby tick rate, and is far below the time the
+	 * arena map takes to load, so it costs nothing perceptible.
+	 *
+	 * A plain constant rather than a UPROPERTY: this class has no Blueprint subclass, so an
+	 * EditDefaultsOnly property here would be unreachable and would only look tunable - the same
+	 * conclusion AKBProjectileDirector and AKBLobbyHud reached.
+	 */
+	static constexpr float StartTravelDelaySeconds = 0.5f;
+
+	/** Marks the lobby as starting and books the travel. Server only. */
+	void BeginStart(const FString& TravelURL);
+
+	/** The booked travel, run once the delay above has elapsed. */
+	void DoStartTravel();
+
+	/** Destination booked by BeginStart. Empty means no travel is pending. */
+	FString PendingTravelURL;
+
+	FTimerHandle StartTravelTimer;
 };

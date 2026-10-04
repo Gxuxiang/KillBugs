@@ -57,6 +57,24 @@ public:
 	/** Server only. */
 	void SetPlayerReady(int32 KBPlayerIndex, bool bReady);
 
+	/**
+	 * True from the moment the run is committed to until the lobby map is torn down.
+	 *
+	 * The HUD swaps the whole lobby for a loading screen on this. Without it the click produced
+	 * no visible change at all on ANY machine: the server called ServerTravel in the same frame
+	 * it handled the request, so the world was already being torn down before a frame could be
+	 * drawn - the host saw the lobby freeze mid-click, and everyone else saw nothing happen and
+	 * no reason given.
+	 *
+	 * Replicated rather than local, because the host is the only one who can press the button and
+	 * everyone else deserves to be told why the lobby just disappeared.
+	 */
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Lobby")
+	bool IsStarting() const { return bStarting; }
+
+	/** Server only. */
+	void SetStarting(bool bInStarting);
+
 private:
 	/**
 	 * An index rather than a pointer to the PlayerState.
@@ -81,4 +99,11 @@ private:
 	 */
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Lobby", meta = (AllowPrivateAccess = "true"))
 	TArray<int32> ReadyPlayerIndices;
+
+	/**
+	 * Latched, never cleared. The lobby exists to reach the arena and has no way back, so once
+	 * this is set the only thing left that can happen is the map change.
+	 */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Lobby", meta = (AllowPrivateAccess = "true"))
+	bool bStarting = false;
 };

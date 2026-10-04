@@ -124,6 +124,22 @@ void AKBLobbyHud::DrawHUD()
 
 	DrawRect(Style::Backdrop, 0.f, 0.f, Canvas->SizeX, Canvas->SizeY);
 
+	// The run has been committed to: there is no lobby left to show, and nothing left to click.
+	// Returning here rather than after the panel is what guarantees that - ButtonRects is still
+	// empty from the Init above, so every hit test misses, and a stray click during the delay
+	// cannot reach a button that is no longer on screen.
+	if (const UWorld* LobbyWorld = GetWorld())
+	{
+		if (const AKBLobbyGameState* LobbyState = LobbyWorld->GetGameState<AKBLobbyGameState>())
+		{
+			if (LobbyState->IsStarting())
+			{
+				DrawLoadingScreen();
+				return;
+			}
+		}
+	}
+
 	// Opaque and painted over everything, deliberately: the lobby is a screen, not a place. That
 	// is what lets the lobby map be a nearly empty level with no camera to place, and it means
 	// nothing about the UI depends on what the map happens to contain.
@@ -217,6 +233,46 @@ void AKBLobbyHud::DrawTitle(const FBox2D& Panel)
 	const float RuleY = Panel.Min.Y + Style::Pad + 42.f;
 	DrawRect(Style::RuleFill, Panel.Min.X + Style::Pad, RuleY,
 		Style::PanelWidth - Style::Pad * 2.f, 2.f);
+}
+
+void AKBLobbyHud::DrawLoadingScreen()
+{
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font)
+	{
+		return;
+	}
+
+	// The SAME panel the lobby just drew, in the same place and at the same size. That is what
+	// makes this read as the screen the player is already on changing its mind, rather than as a
+	// cut to somewhere else.
+	const FBox2D Panel(
+		FVector2D((Canvas->SizeX - Style::PanelWidth) * 0.5f, (Canvas->SizeY - Style::PanelHeight) * 0.5f),
+		FVector2D((Canvas->SizeX + Style::PanelWidth) * 0.5f, (Canvas->SizeY + Style::PanelHeight) * 0.5f));
+
+	DrawPanel(Panel, Style::PanelFill);
+
+	const float CentreX = Panel.Min.X + Style::PanelWidth * 0.5f;
+	const float CentreY = Panel.Min.Y + Style::PanelHeight * 0.5f;
+
+	// Deliberately STATIC: no spinner, no marching dots, no elapsed counter.
+	//
+	// This frame is the last one the game draws before the map changes, and the engine draws
+	// nothing of its own during a non-seamless travel (TransitionMap is unset in
+	// DefaultEngine.ini). So it stays frozen on screen for the entire arena load. Anything that
+	// moved would stop mid-stride and read as a hang - a still line reads as a wait, which is
+	// what it is.
+	const FString Title = TEXT("正在进入游戏…");
+	float TitleWidth = 0.f;
+	float TitleHeight = 0.f;
+	GetTextSize(Title, TitleWidth, TitleHeight, Font, 1.8f);
+	DrawText(Title, Style::Ink, CentreX - TitleWidth * 0.5f, CentreY - TitleHeight, Font, 1.8f, false);
+
+	const FString Subtitle = TEXT("正在加载竞技场地图，请稍候");
+	float SubWidth = 0.f;
+	float SubHeight = 0.f;
+	GetTextSize(Subtitle, SubWidth, SubHeight, Font, 1.0f);
+	DrawText(Subtitle, Style::Dim, CentreX - SubWidth * 0.5f, CentreY + 26.f, Font, 1.0f, false);
 }
 
 void AKBLobbyHud::DrawServerList(const FBox2D& Panel)

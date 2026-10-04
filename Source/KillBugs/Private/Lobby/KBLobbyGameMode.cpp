@@ -8,6 +8,7 @@
 #include "Lobby/KBLobbyGameState.h"
 #include "Lobby/KBLobbyPlayerController.h"
 #include "Net/KBSessionSubsystem.h"
+#include "TimerManager.h"
 #include "UI/KBLobbyHud.h"
 
 AKBLobbyGameMode::AKBLobbyGameMode()
@@ -106,11 +107,52 @@ bool AKBLobbyGameMode::RequestStartGame(AKBPlayerState* Requester)
 
 	UE_LOG(LogKillBugs, Display, TEXT("Lobby: starting the run with %d player(s)"), GetNumPlayers());
 
+	// Deferred, not travelled here - see StartTravelDelaySeconds.
+	BeginStart(KBTravel::ToArenaAsListenServer());
+	return true;
+}
+
+void AKBLobbyGameMode::BeginStart(const FString& TravelURL)
+{
+	UWorld* World = GetWorld();
+	if (!World || PendingTravelURL.Len() > 0)
+	{
+		// Already committed. A second press inside the delay window must not book a second
+		// travel - ServerTravel re-entered while the first is in flight is not something to
+		// find out about empirically.
+		return;
+	}
+
+	if (AKBLobbyGameState* LobbyState = GetGameState<AKBLobbyGameState>())
+	{
+		// Told BEFORE the wait starts, so every screen has switched to the loading screen by the
+		// time the map actually changes. This is the whole reason the travel is deferred.
+		LobbyState->SetStarting(true);
+	}
+
+	PendingTravelURL = TravelURL;
+
+	World->GetTimerManager().SetTimer(
+		StartTravelTimer, this, &AKBLobbyGameMode::DoStartTravel, StartTravelDelaySeconds, false);
+}
+
+void AKBLobbyGameMode::DoStartTravel()
+{
+	if (PendingTravelURL.Len() == 0)
+	{
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Display, TEXT("Lobby: travelling to %s"), *PendingTravelURL);
+
 	// Non-seamless travel, and that is fine here: ProcessServerTravel issues a ClientTravel to
 	// every connected controller, so the others follow. bUseSeamlessTravel stays false because
 	// the arena has nothing from the lobby worth carrying across.
-	GetWorld()->ServerTravel(KBTravel::ToArenaAsListenServer());
-	return true;
+	//
+	// The last frame each machine drew before this is the loading screen, and it stays on screen
+	// (the engine draws nothing of its own - TransitionMap is unset) until the arena's first
+	// frame. That freeze is the loading screen doing its job.
+	GetWorld()->ServerTravel(PendingTravelURL);
 }
 
 bool AKBLobbyGameMode::RequestSetReady(AKBPlayerState* Requester, bool bReady)
@@ -162,7 +204,10 @@ void AKBLobbyGameMode::StartSoloRun()
 	// single-player run would leave the machine accepting connections it has no room for.
 	UE_LOG(LogKillBugs, Display, TEXT("Lobby: starting a solo run"));
 
-	GetWorld()->ServerTravel(KBTravel::ToArenaSolo());
+	// The same deferred path as the host's, for the same reason: solo is the case where the
+	// player is staring straight at the button they just pressed, so a click that appears to do
+	// nothing is at its worst here.
+	BeginStart(KBTravel::ToArenaSolo());
 }
 
 // ---------------------------------------------------------------------------------------

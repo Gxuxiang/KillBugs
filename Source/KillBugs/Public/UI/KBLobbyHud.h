@@ -69,6 +69,15 @@ private:
 	void DrawButtons(const FBox2D& Panel);
 	void DrawStatusLine(const FBox2D& Panel);
 
+	/**
+	 * The screen shown once the host has committed to starting the run.
+	 *
+	 * Replaces the lobby entirely rather than sitting on top of it: the buttons are gone, so
+	 * there is nothing left to click, and the last frame drawn before the map change is this
+	 * one - it is what stays frozen on screen for the whole arena load.
+	 */
+	void DrawLoadingScreen();
+
 	/** One button. Returns the rect it drew, so the caller can store it for hit testing. */
 	FBox2D DrawButton(const FBox2D& Rect, const FString& Label, bool bEnabled, bool bHovered);
 

@@ -9,6 +9,17 @@ void AKBLobbyGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 
 	DOREPLIFETIME(AKBLobbyGameState, HostPlayerIndex);
 	DOREPLIFETIME(AKBLobbyGameState, ReadyPlayerIndices);
+	DOREPLIFETIME(AKBLobbyGameState, bStarting);
+}
+
+void AKBLobbyGameState::SetStarting(bool bInStarting)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	bStarting = bInStarting;
 }
 
 void AKBLobbyGameState::SetHostPlayerIndex(int32 InHostPlayerIndex)
