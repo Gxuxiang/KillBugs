@@ -16,6 +16,24 @@ void AKBGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 	DOREPLIFETIME(AKBGameState, PhaseEndServerTime);
 	DOREPLIFETIME(AKBGameState, PhaseStartServerTime);
 	DOREPLIFETIME(AKBGameState, Timings);
+	DOREPLIFETIME(AKBGameState, RunResult);
+}
+
+void AKBGameState::SetRunResultServer(EKBRunResult Result)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// Latched on purpose - see the note in the header. A wipe checked in the same frame that the
+	// team finished extracting must not turn a success into a failure.
+	if (RunResult != EKBRunResult::InProgress)
+	{
+		return;
+	}
+
+	RunResult = Result;
 }
 
 float FKBPhaseTimings::GetPhaseDuration(EKBWavePhase Phase) const

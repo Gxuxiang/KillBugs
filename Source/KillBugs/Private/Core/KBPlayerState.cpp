@@ -4,6 +4,7 @@
 #include "Data/KBCardDefinition.h"
 #include "Data/KBWeaponDefinition.h"
 #include "GameFramework/PlayerController.h"
+#include "KBGameSettings.h"
 #include "KillBugs.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/UObjectIterator.h"
@@ -56,7 +57,31 @@ void AKBPlayerState::AddXP(int32 Amount)
 	}
 
 	XP = FMath::Max(0, XP + Amount);
+
+	// Recomputed from the total rather than incremented, so the level cannot drift away from the
+	// XP it is supposed to represent however many times this is called.
+	PlayerLevel = ComputeLevelForXP(XP);
+
 	OnRunStateChanged.Broadcast();
+}
+
+int32 AKBPlayerState::ComputeLevelForXP(int32 InXP) const
+{
+	const int32 PerLevel = FMath::Max(1, KBSettings().XpPerLevel);
+
+	// Level N -> N+1 costs PerLevel * N, so early levels come quickly and later ones take
+	// progressively longer. Walking the series is fine: the loop runs once per level earned, and
+	// the number of levels reachable in a run is small.
+	int32 Level = 1;
+	int32 Remaining = InXP;
+
+	while (Remaining >= PerLevel * Level)
+	{
+		Remaining -= PerLevel * Level;
+		++Level;
+	}
+
+	return Level;
 }
 
 void AKBPlayerState::SetDowned(bool bInDowned)

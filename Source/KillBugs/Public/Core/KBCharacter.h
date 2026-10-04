@@ -32,9 +32,10 @@ public:
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	/** Server-side. Puts the pawn back in the fight at full health. */
-	UFUNCTION(BlueprintCallable, Category = "KillBugs|Health")
-	void Revive();
+	// Revive() used to be declared here: server-side, back on your feet at full health. It had
+	// exactly one caller - the auto-revive that fired for every downed player at the start of
+	// every wave - and once rescue became something a teammate does, that caller went away and
+	// so did the function. HandleRescued below is what replaced it.
 
 	/**
 	 * Test hook: fire the manual weapon once, through the same routing the trigger uses.
@@ -120,6 +121,23 @@ protected:
 
 	/** Reverses ApplyDownedState. */
 	void ApplyRevivedState();
+
+	/**
+	 * The rescue zone this character projects while downed.
+	 *
+	 * Lives on the character rather than being spawned as its own actor because the zone IS this
+	 * character's position - a separate actor would be a second thing to keep in step with a
+	 * body that never moves, and one more actor per downed player.
+	 *
+	 * Its radius, duration and Reset policy are configured from KBSettings in the constructor,
+	 * where the settings are already being read for movement speed and health.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "KillBugs|Health")
+	TObjectPtr<class UKBChannelComponent> RescueChannel;
+
+	/** Server-side. Called when the rescue channel fills. */
+	UFUNCTION()
+	void HandleRescued();
 
 	/** Rotates the pawn to the replicated aim; used for everyone except the local player. */
 	void ApplyReplicatedAim();

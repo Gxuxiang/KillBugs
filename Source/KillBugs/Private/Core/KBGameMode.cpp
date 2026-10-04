@@ -12,6 +12,7 @@
 #include "GameFramework/Pawn.h"
 #include "KillBugs.h"
 #include "KBGameSettings.h"
+#include "Net/KBSessionSubsystem.h"
 #include "Swarm/KBEnemyDirector.h"
 #include "UI/KBHud.h"
 
@@ -105,9 +106,7 @@ void AKBGameMode::Tick(float DeltaSeconds)
 	// it can happen at any point in the loop.
 	if (RunState->GetWavePhase() != EKBWavePhase::RunOver && AreAllPlayersDowned())
 	{
-		RunState->SetWavePhaseServer(EKBWavePhase::RunOver, 0.f);
-		UE_LOG(LogKillBugs, Display, TEXT("Run over: every player is down at wave %d"),
-			RunState->GetWaveIndex() + 1);
+		EndRun(EKBRunResult::WipedOut);
 		return;
 	}
 
@@ -155,9 +154,103 @@ void AKBGameMode::Tick(float DeltaSeconds)
 		}
 		break;
 
+	case EKBWavePhase::RunOver:
+		// The summary has been on screen for RunSummarySeconds; now everybody goes back.
+		//
+		// No extra "set a flag then travel a beat later" dance is needed here - unlike the lobby,
+		// where the travel used to happen in the same frame as the click. The delay IS the
+		// summary: the phase end time was set when the run ended, and the summary has been
+		// drawn on every frame since.
+		if (Now >= RunState->GetPhaseEndServerTime())
+		{
+			ReturnToLobby();
+		}
+		break;
+
 	default:
 		break;
 	}
+}
+
+void AKBGameMode::EndRun(EKBRunResult Result)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	AKBGameState* RunState = GetGameState<AKBGameState>();
+	if (!RunState || RunState->GetWavePhase() == EKBWavePhase::RunOver)
+	{
+		// Already over. A run that has ended must not be re-ended, or a wipe in the frame after
+		// a successful extraction would rewrite the verdict and also push the return-to-lobby
+		// timer out again.
+		return;
+	}
+
+	RunState->SetRunResultServer(Result);
+	RunState->SetWavePhaseServer(EKBWavePhase::RunOver,
+		GetWorld()->GetTimeSeconds() + KBSettings().RunSummarySeconds);
+
+	UE_LOG(LogKillBugs, Display, TEXT("Run over (%s) at wave %d - returning to the lobby in %.0fs"),
+		Result == EKBRunResult::Extracted ? TEXT("extracted") : TEXT("wiped out"),
+		RunState->GetWaveIndex() + 1, KBSettings().RunSummarySeconds);
+
+	// What the summary screen is showing, written to the log as well.
+	//
+	// Not redundant: DrawHUD never runs under -nullrhi, so without this there is no way to check
+	// from a headless run that the numbers on that screen are the ones that were earned - and
+	// the level in particular is derived (AKBPlayerState::ComputeLevelForXP), so it is exactly
+	// the sort of thing that is wrong while looking right.
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* PlayerController = It->Get();
+		const AKBPlayerState* PlayerState =
+			PlayerController ? PlayerController->GetPlayerState<AKBPlayerState>() : nullptr;
+
+		if (PlayerState)
+		{
+			UE_LOG(LogKillBugs, Display,
+				TEXT("  summary for player %d: level %d | xp %d | gold %d"),
+				PlayerState->GetKBPlayerIndex(), PlayerState->GetKBLevel(),
+				PlayerState->GetXP(), PlayerState->GetGold());
+		}
+	}
+}
+
+void AKBGameMode::ReturnToLobby()
+{
+	UWorld* World = GetWorld();
+	if (!World || bReturningToLobby)
+	{
+		return;
+	}
+
+	// Latched BEFORE the travel, not after: ServerTravel only takes effect at the end of the
+	// frame, so without this the RunOver branch calls it again on every tick until the world
+	// changes. A two-process test caught exactly that - five "travelling back to the lobby"
+	// lines inside one second, each one queueing another pending travel onto a world that was
+	// already on its way out.
+	bReturningToLobby = true;
+
+	// Listen servers go back to a lobby that is still joinable; a solo run goes back to an
+	// ordinary lobby.
+	//
+	// The ?listen is not cosmetic and not redundant with "we are already a listen server": the
+	// net mode of the destination world is derived from the URL alone, so travelling without it
+	// silently demotes the host to standalone and drops every client on arrival. See the note on
+	// KBTravel::ToArenaAsListenServer, which learned the same lesson the hard way.
+	const bool bWasListenServer = GetNetMode() == NM_ListenServer;
+	const TCHAR* Target = bWasListenServer ? KBTravel::ToLobbyAsListenServer() : KBTravel::ToLobby();
+
+	UE_LOG(LogKillBugs, Display, TEXT("Run done: travelling back to the lobby (%s)"),
+		bWasListenServer ? TEXT("listen") : TEXT("solo"));
+
+	// NOTE: this is a non-seamless travel (bUseSeamlessTravel is false), so every PlayerState is
+	// destroyed on arrival and Gold/XP/level go with it. That is acceptable while the economy is
+	// still per-run, but the design has gold persisting across runs - so when the stash lands,
+	// this is the place it has to be banked, BEFORE the travel.
+	World->ServerTravel(Target);
 }
 
 void AKBGameMode::StartWave(int32 WaveIndex)
@@ -168,9 +261,12 @@ void AKBGameMode::StartWave(int32 WaveIndex)
 		return;
 	}
 
-	// Anyone who went down during the last wave is back on their feet for this one. A co-op
-	// run should not end because one player was unlucky; only a total wipe does that.
-	ReviveDownedPlayers();
+	// NOTE: this is where ReviveDownedPlayers() used to be called - every downed player stood
+	// back up for free at the start of the next wave. That is gone: getting somebody up is now
+	// something a teammate does, by standing in the circle their body projects
+	// (UKBChannelComponent on AKBCharacter). A downed player who is never reached stays down,
+	// which is also what makes the extraction rule bite - nobody can extract while a teammate
+	// is on the floor.
 
 	EnemyDirector->SetWaveIndex(WaveIndex);
 
@@ -366,37 +462,6 @@ bool AKBGameMode::AreAllPlayersDowned() const
 	// Vacuously "all downed" with nobody in the game, which is not a run over - that is just
 	// a server that nobody has joined yet.
 	return Count > 0;
-}
-
-void AKBGameMode::ReviveDownedPlayers()
-{
-	const AKBGameState* RunState = GetGameState<AKBGameState>();
-	if (!RunState)
-	{
-		return;
-	}
-
-	for (APlayerState* PlayerState : RunState->PlayerArray)
-	{
-		AKBPlayerState* KBPlayerState = Cast<AKBPlayerState>(PlayerState);
-		if (!KBPlayerState || !KBPlayerState->IsDowned())
-		{
-			continue;
-		}
-
-		KBPlayerState->SetDowned(false);
-
-		if (APawn* Pawn = KBPlayerState->GetPawn())
-		{
-			if (AKBCharacter* Character = Cast<AKBCharacter>(Pawn))
-			{
-				Character->Revive();
-			}
-		}
-
-		UE_LOG(LogKillBugs, Display, TEXT("Player %d revived for wave %d"),
-			KBPlayerState->GetKBPlayerIndex(), RunState->GetWaveIndex() + 1);
-	}
 }
 
 bool AKBGameMode::ApplyCardChoice(AKBPlayerState* PlayerState, int32 ChoiceIndex)

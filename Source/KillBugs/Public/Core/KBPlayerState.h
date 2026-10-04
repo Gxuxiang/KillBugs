@@ -51,6 +51,17 @@ public:
 	/** Server-only. */
 	void AddXP(int32 Amount);
 
+	/**
+	 * What level a given total XP corresponds to.
+	 *
+	 * Exists because PlayerLevel used to be a field nothing ever wrote: it sat at 1 for the whole
+	 * run while the HUD printed "等级 1" and every card's MinPlayerLevel gate compared against a
+	 * constant. Deriving it from XP is what makes both of those real.
+	 *
+	 * The curve is KBSettings().XpPerLevel - see the tooltip there.
+	 */
+	int32 ComputeLevelForXP(int32 InXP) const;
+
 	/** Server-only. */
 	void SetDowned(bool bInDowned);
 

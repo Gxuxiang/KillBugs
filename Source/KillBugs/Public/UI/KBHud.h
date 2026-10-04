@@ -44,7 +44,43 @@ protected:
 	void DrawEnemyHealthBars();
 
 	void DrawRunReadout();
+
+	/**
+	 * A health bar per teammate, down the bottom-left.
+	 *
+	 * The readout above is about YOU - your level, your gold, your health. In a co-op run the
+	 * other thing a player needs at a glance is whether the person next to them is about to go
+	 * down, and until this existed there was no way to tell short of watching them die.
+	 *
+	 * Anchored to the BOTTOM of the screen rather than stacked under the readout, because the
+	 * readout's height depends on what it is currently showing (the phase countdown comes and
+	 * goes) and anything placed after it would shift around with it.
+	 *
+	 * Read from the GameState's PlayerArray, not from the player controller iterator - on a client
+	 * that iterator only yields the local player, which is the bug the rescue ring shipped with.
+	 */
+	void DrawPartyStatus();
 	void DrawCardDraft();
+
+	/**
+	 * The rescue ring every downed player projects, with its progress.
+	 *
+	 * Without this the rescue mechanic is invisible: a downed player sees their camera keep
+	 * running while nothing on screen says "somebody can pick you up here", and a teammate has
+	 * no way to know where the body is or how far a rescue has got. The logic was verified
+	 * server-side long before this existed, which is exactly why it has to be drawn - a mechanic
+	 * nobody can see is a mechanic nobody can use.
+	 */
+	void DrawRescueCircles();
+
+	/**
+	 * The end-of-run summary, shown while the phase is RunOver.
+	 *
+	 * It has to be on screen for the whole RunSummarySeconds window, because that window is the
+	 * return-to-lobby delay - whatever is not drawn here is simply never seen. It is also the
+	 * only place the run's outcome is stated: without it a wipe just froze the game silently.
+	 */
+	void DrawRunSummary();
 	void DrawCard(const UKBCardDefinition& Card, const FBox2D& Rect, bool bHovered, int32 Index);
 
 	TArray<FBox2D> CardRects;

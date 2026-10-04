@@ -31,6 +31,27 @@ enum class EKBWavePhase : uint8
 	RunOver    UMETA(DisplayName = "Run Over")
 };
 
+/**
+ * Why the run ended.
+ *
+ * Replaces what used to be a dead end: entering RunOver logged a line and then nothing happened,
+ * forever - no summary, no way back to the lobby, no restart. The phase alone cannot carry this
+ * because a run ends in two different ways that need different words on screen, and extraction
+ * (not built yet) will end a run *successfully*.
+ *
+ * InProgress is the value while the run is still going, and is also what a run that ended before
+ * anything set this would read as - which is why it is the default rather than a "None".
+ */
+UENUM(BlueprintType)
+enum class EKBRunResult : uint8
+{
+	InProgress UMETA(DisplayName = "In Progress"),
+	/** Every player was down at the same moment. */
+	WipedOut   UMETA(DisplayName = "Wiped Out"),
+	/** The team held the extraction zone to the end of its timer. */
+	Extracted  UMETA(DisplayName = "Extracted")
+};
+
 /** Fired on clients whenever the replicated phase changes, so UI can react without polling. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FKBOnWavePhaseChanged, EKBWavePhase, NewPhase);
 
@@ -99,6 +120,20 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "KillBugs|Run")
 	FKBOnWavePhaseChanged OnWavePhaseChanged;
 
+	/** How the run ended, or InProgress while it has not. */
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Run")
+	EKBRunResult GetRunResult() const { return RunResult; }
+
+	/**
+	 * Records how the run ended. Server only, and latched: the first caller wins.
+	 *
+	 * "First caller wins" matters because the two ways a run can end are checked in different
+	 * places - the wipe is polled every frame, while extraction will be triggered by the zone's
+	 * own timer - and a wipe in the same frame the team extracted must not overwrite the good
+	 * news with the bad.
+	 */
+	void SetRunResultServer(EKBRunResult Result);
+
 	// ---- Server-only mutators -----------------------------------------------------------
 	// The GameMode drives the phase machine through these rather than touching the
 	// replicated fields directly, so there is exactly one place that authorises a change.
@@ -142,6 +177,9 @@ protected:
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")
 	FKBPhaseTimings Timings;
+
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")
+	EKBRunResult RunResult = EKBRunResult::InProgress;
 
 	// EnemiesAlive, RunSeed and WaveModifiers are added in Phase 2/4, once the swarm and the
 	// wave definitions exist to populate them.

@@ -11,6 +11,7 @@
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
+#include "Interaction/KBChannelComponent.h"
 #include "KBConsoleVariables.h"
 #include "KBGameSettings.h"
 #include "KillBugs.h"
@@ -70,6 +71,22 @@ AKBCharacter::AKBCharacter()
 	WeaponInventory = CreateDefaultSubobject<UKBWeaponInventoryComponent>(TEXT("WeaponInventory"));
 	StatSheet = CreateDefaultSubobject<UKBStatSheetComponent>(TEXT("StatSheet"));
 
+	// The rescue zone. Inactive until this character is downed.
+	//
+	// Radius and duration are placeholders here and overwritten from KBSettings in BeginPlay,
+	// for the same reason the camera values above are: touching another class's CDO while this
+	// one is still being constructed is not safe.
+	RescueChannel = CreateDefaultSubobject<UKBChannelComponent>(TEXT("RescueChannel"));
+	RescueChannel->SetupAttachment(RootComponent);
+
+	// The owner's own pawn does not count, so a downed player cannot revive themselves by lying
+	// still inside their own circle - which they always are.
+	RescueChannel->Gate = EKBChannelGate::AnyOtherPlayer;
+
+	// Reset, not Pause: walking away from somebody you were picking up should cost the progress.
+	// Deliberately the opposite of the extraction zone, which pauses.
+	RescueChannel->BreakPolicy = EKBChannelBreak::Reset;
+
 	// ---- Camera ------------------------------------------------------------------------
 	CameraBoom = CreateDefaultSubobject<USceneComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
@@ -107,6 +124,19 @@ void AKBCharacter::BeginPlay()
 	if (StatSheet)
 	{
 		StatSheet->OnHealthDepleted.AddDynamic(this, &AKBCharacter::HandleHealthDepleted);
+	}
+
+	// The rescue zone's shape comes from the settings, here rather than in the constructor,
+	// alongside the camera values above and for the same reason.
+	if (RescueChannel)
+	{
+		RescueChannel->Radius = KBSettings().RescueRadius;
+		RescueChannel->DurationSeconds = KBSettings().RescueSeconds;
+
+		// Bound once, in BeginPlay, rather than every time this character goes down: AddDynamic
+		// does not de-duplicate, so binding in ApplyDownedState would stack a new handler on
+		// every death and fire the revive N times on the Nth knockdown.
+		RescueChannel->OnChannelComplete.AddDynamic(this, &AKBCharacter::HandleRescued);
 	}
 }
 
@@ -170,6 +200,16 @@ void AKBCharacter::ApplyDownedState()
 
 	// Also stops the aim update and the manual-weapon tick.
 	SetActorTickEnabled(false);
+
+	// The rescue zone opens where the body fell, and stays open until somebody fills it.
+	//
+	// Note this runs on clients too (via the replicated OnRep), but SetChannelActive is
+	// server-only by construction, so only the authority ever starts the timer - everyone else
+	// just sees the ring.
+	if (RescueChannel)
+	{
+		RescueChannel->SetChannelActive(true);
+	}
 }
 
 void AKBCharacter::ApplyRevivedState()
@@ -180,21 +220,47 @@ void AKBCharacter::ApplyRevivedState()
 	}
 
 	SetActorTickEnabled(true);
+
+	// Close the zone. Harmless if it already completed and closed itself - the completion path
+	// sets bActive false before broadcasting.
+	if (RescueChannel)
+	{
+		RescueChannel->SetChannelActive(false);
+	}
 }
 
-void AKBCharacter::Revive()
+void AKBCharacter::HandleRescued()
 {
+	// The channel only ever completes on the server, so this is server-side by construction -
+	// the same argument HandleHealthDepleted makes.
+	if (!bDowned)
+	{
+		return;
+	}
+
+	// Half health, not full: being picked up should leave you fragile enough that the next few
+	// seconds still matter. KBSettings().ReviveHealthFraction is the knob.
 	if (StatSheet)
 	{
-		StatSheet->Heal(0.f); // to full
+		StatSheet->Heal(StatSheet->GetMaxHealth() * KBSettings().ReviveHealthFraction);
 	}
 
-	if (bDowned)
+	if (AKBPlayerState* KBPlayerState = GetPlayerState<AKBPlayerState>())
 	{
-		bDowned = false;
-		ApplyRevivedState();
+		KBPlayerState->SetDowned(false);
 	}
+
+	bDowned = false;
+	ApplyRevivedState();
+
+	UE_LOG(LogKillBugs, Display, TEXT("Character revived by a teammate"));
 }
+
+// NOTE: AKBCharacter::Revive() used to live here, healing to full and clearing the downed flag.
+// Its only caller was AKBGameMode::ReviveDownedPlayers, which revived everybody at the start of
+// every wave. That auto-revive is gone - rescue is now something a teammate does - so the
+// function had no callers left and was deleted rather than kept "in case". HandleRescued below
+// is what replaced it, and it deliberately heals to a fraction instead of to full.
 
 void AKBCharacter::Tick(float DeltaSeconds)
 {

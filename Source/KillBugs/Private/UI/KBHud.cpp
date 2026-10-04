@@ -10,9 +10,12 @@
 #include "Core/KBPlayerState.h"
 #include "Data/KBCardDefinition.h"
 #include "Data/KBWeaponDefinition.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
+#include "Interaction/KBChannelComponent.h"
 
 namespace
 {
@@ -114,10 +117,361 @@ void AKBHud::DrawHUD()
 
 	CardRects.Reset();
 
+	// The run is over: the summary replaces everything else rather than sitting on top of it.
+	// Health bars over bugs and a draft panel would both be noise at this point, and leaving
+	// CardRects populated would let a stray click during the countdown pick a card for a run
+	// that has already finished.
+	if (const UWorld* HudWorld = GetWorld())
+	{
+		if (const AKBGameState* HudRunState = HudWorld->GetGameState<AKBGameState>())
+		{
+			if (HudRunState->GetWavePhase() == EKBWavePhase::RunOver)
+			{
+				DrawRunSummary();
+				return;
+			}
+		}
+	}
+
 	DrawTimeline();
 	DrawEnemyHealthBars();
+	DrawRescueCircles();
 	DrawRunReadout();
+	DrawPartyStatus();
 	DrawCardDraft();
+}
+
+void AKBHud::DrawPartyStatus()
+{
+	const APlayerController* PlayerController = GetOwningPlayerController();
+	const UWorld* World = PlayerController ? PlayerController->GetWorld() : nullptr;
+	const AKBGameState* RunState = World ? World->GetGameState<AKBGameState>() : nullptr;
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+
+	if (!RunState || !Font || !Canvas)
+	{
+		return;
+	}
+
+	const AKBPlayerState* LocalState = PlayerController->GetPlayerState<AKBPlayerState>();
+
+	// The local player is deliberately not in this list: their health is already the big bar in
+	// the readout, and drawing it twice would make the panel read as five players in a four
+	// player game.
+	TArray<const AKBPlayerState*, TInlineAllocator<4>> Teammates;
+	for (const APlayerState* PlayerState : RunState->PlayerArray)
+	{
+		const AKBPlayerState* KBState = Cast<AKBPlayerState>(PlayerState);
+		if (KBState && KBState != LocalState)
+		{
+			Teammates.Add(KBState);
+		}
+	}
+
+	if (Teammates.Num() == 0)
+	{
+		return;
+	}
+
+	constexpr float RowHeight = 34.f;
+	constexpr float BarWidth = 170.f;
+	constexpr float BarHeight = 12.f;
+	constexpr float Margin = 20.f;
+
+	// Bottom-anchored: the panel grows upward, so adding a player never pushes anything off the
+	// bottom or moves a row that was already there.
+	float Y = Canvas->SizeY - Margin - Teammates.Num() * RowHeight;
+
+	for (const AKBPlayerState* Teammate : Teammates)
+	{
+		const APawn* Pawn = Teammate->GetPawn();
+		const UKBStatSheetComponent* Stats =
+			Pawn ? Pawn->FindComponentByClass<UKBStatSheetComponent>() : nullptr;
+
+		const float Fraction = Stats ? Stats->GetHealthFraction() : 0.f;
+		const bool bDowned = Teammate->IsDowned();
+
+		// A downed teammate's bar is drawn drained regardless of how much health the component
+		// still reports: "on the floor" is the state that matters to the player reading this,
+		// and a half-full bar next to a body would say the opposite.
+		const float Shown = bDowned ? 0.f : Fraction;
+
+		const FString Name = Teammate->GetPlayerName();
+		DrawText(Name, bDowned ? FLinearColor(0.90f, 0.36f, 0.32f, 1.f) : Dim,
+			Margin, Y, Font, 1.0f, false);
+
+		const float BarY = Y + 16.f;
+		DrawRect(FLinearColor(0.10f, 0.10f, 0.12f, 0.9f), Margin, BarY, BarWidth, BarHeight);
+
+		if (Shown > 0.f)
+		{
+			const FLinearColor BarColour = FLinearColor::LerpUsingHSV(
+				FLinearColor(0.90f, 0.15f, 0.15f, 1.f),
+				FLinearColor(0.30f, 0.85f, 0.35f, 1.f),
+				Shown);
+			DrawRect(BarColour, Margin, BarY, BarWidth * Shown, BarHeight);
+		}
+
+		// The word, not just the colour. Colour alone is the one signal a player with a colour
+		// vision difference cannot read, and "my teammate is down" is worth more than a hue.
+		if (bDowned)
+		{
+			DrawText(TEXT("倒地"), FLinearColor(0.90f, 0.36f, 0.32f, 1.f),
+				Margin + BarWidth + 10.f, BarY - 2.f, Font, 1.0f, false);
+		}
+
+		Y += RowHeight;
+	}
+}
+
+void AKBHud::DrawRescueCircles()
+{
+	const UWorld* World = GetWorld();
+	const APlayerController* PlayerController = GetOwningPlayerController();
+	if (!World || !PlayerController || !Canvas)
+	{
+		return;
+	}
+
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	const APlayerController* LocalController = PlayerController;
+
+	// Iterated from the GameState's PlayerArray, NOT from World->GetPlayerControllerIterator().
+	//
+	// On a client the controller iterator only yields the LOCAL player's controller - remote
+	// players' controllers do not exist as actorsthere - so a circle for a teammate would never
+	// be found and the ring would only ever appear under your own body. PlayerArray is
+	// replicated to every machine and carries every player's pawn, which is what the ring is
+	// actually about.
+	const AKBGameState* RunState = World->GetGameState<AKBGameState>();
+	if (!RunState)
+	{
+		return;
+	}
+
+	for (const APlayerState* PlayerState : RunState->PlayerArray)
+	{
+		const APawn* Pawn = PlayerState ? PlayerState->GetPawn() : nullptr;
+		if (!Pawn)
+		{
+			continue;
+		}
+
+		// Only downed players have this, and only while they are down - the component is
+		// inactive the rest of the time, so this loop needs no extra "is he down" test.
+		const UKBChannelComponent* Channel = Pawn->FindComponentByClass<UKBChannelComponent>();
+		if (!Channel || !Channel->IsChannelActive())
+		{
+			continue;
+		}
+
+		// The ring belongs on the FLOOR, and the component sits at the owner's origin - which
+		// for a character is the middle of its capsule, not its feet. Drawing there would put
+		// the circle about half a body above the ground, which from a pitched camera reads as a
+		// ring hanging in the air rather than one painted on the floor.
+		FVector Centre = Channel->GetComponentLocation();
+		if (const ACharacter* Character = Cast<ACharacter>(Pawn))
+		{
+			if (const UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
+			{
+				Centre.Z -= Capsule->GetScaledCapsuleHalfHeight();
+			}
+		}
+
+		// A little above the floor, so the ring is not coplanar with it - the same reason the
+		// slime decals sit 8 units up.
+		Centre.Z += 4.f;
+
+		const float Radius = Channel->Radius;
+		const float Progress = Channel->GetProgress();
+
+		// Projected once per segment endpoint and shared between neighbours, so the ring cannot
+		// tear where two segments disagree about a point.
+		constexpr int32 Segments = 48;
+		TArray<FVector, TInlineAllocator<Segments>> Points;
+		Points.SetNum(Segments);
+
+		bool bAnyProjected = false;
+		for (int32 Index = 0; Index < Segments; ++Index)
+		{
+			const float Angle = 2.f * PI * static_cast<float>(Index) / static_cast<float>(Segments);
+			const FVector World_ = Centre + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.f) * Radius;
+			Points[Index] = Project(World_);
+			bAnyProjected |= Points[Index].Z > 0.f;
+		}
+
+		if (!bAnyProjected)
+		{
+			continue;
+		}
+
+		// The progress arc is drawn as a subset of the SAME points rather than as an arc of its
+		// own, so it grows along the ring instead of slowly drifting off it.
+		const int32 ProgressSegments = FMath::Clamp(FMath::RoundToInt(Progress * Segments), 0, Segments);
+
+		for (int32 Index = 0; Index < Segments; ++Index)
+		{
+			const FVector& A = Points[Index];
+			const FVector& B = Points[(Index + 1) % Segments];
+
+			// Either end behind the camera drops the segment. Half a ring drawn through a point
+			// that is not on screen produces a long streak across the whole view.
+			if (A.Z <= 0.f || B.Z <= 0.f)
+			{
+				continue;
+			}
+
+			const bool bFilled = Index < ProgressSegments;
+			const FLinearColor Colour = bFilled
+				? FLinearColor(0.36f, 0.74f, 0.46f, 0.95f)
+				: FLinearColor(0.55f, 0.62f, 0.75f, 0.35f);
+
+			DrawLine(A.X, A.Y, B.X, B.Y, Colour, bFilled ? 4.f : 2.f);
+		}
+
+		if (!Font)
+		{
+			continue;
+		}
+
+		const FVector CentreProjected = Project(Centre);
+		if (CentreProjected.Z <= 0.f)
+		{
+			continue;
+		}
+
+		// The label says what the player should DO, not what the system is doing. "等待队友" on
+		// the body and "救助中" on everybody else's screen are the two things a player needs to
+		// know, and neither is obvious from a ring alone.
+		const bool bIsLocalBody = (PlayerState == LocalController->PlayerState);
+		FString Label;
+		FLinearColor LabelColour;
+
+		if (Progress > 0.f)
+		{
+			Label = FString::Printf(TEXT("救助中 %d%%"), FMath::RoundToInt(Progress * 100.f));
+			LabelColour = FLinearColor(0.36f, 0.74f, 0.46f, 1.f);
+		}
+		else if (bIsLocalBody)
+		{
+			Label = TEXT("等待队友靠近救援");
+			LabelColour = FLinearColor(0.90f, 0.36f, 0.32f, 1.f);
+		}
+		else
+		{
+			Label = TEXT("队友倒地");
+			LabelColour = FLinearColor(0.92f, 0.94f, 0.98f, 1.f);
+		}
+
+		float LabelWidth = 0.f;
+		float LabelHeight = 0.f;
+		GetTextSize(Label, LabelWidth, LabelHeight, Font, 1.1f);
+		DrawText(Label, LabelColour, CentreProjected.X - LabelWidth * 0.5f,
+			CentreProjected.Y - LabelHeight, Font, 1.1f, false);
+	}
+}
+
+void AKBHud::DrawRunSummary()
+{
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font)
+	{
+		return;
+	}
+
+	const AKBGameState* RunState = GetWorld() ? GetWorld()->GetGameState<AKBGameState>() : nullptr;
+	if (!RunState)
+	{
+		return;
+	}
+
+	const float CentreX = Canvas->SizeX * 0.5f;
+	const float CentreY = Canvas->SizeY * 0.5f;
+
+	// A dim over everything, so the arena behind it reads as background rather than as a place
+	// still being played.
+	DrawRect(FLinearColor(0.03f, 0.035f, 0.055f, 0.82f), 0.f, 0.f, Canvas->SizeX, Canvas->SizeY);
+
+	const EKBRunResult Result = RunState->GetRunResult();
+
+	// The verdict, in the largest thing on screen - this is the one line the player is looking
+	// for. Colour carries it too, so it reads before the text does.
+	FString Title;
+	FLinearColor TitleColour;
+	switch (Result)
+	{
+	case EKBRunResult::Extracted:
+		Title = TEXT("撤离成功");
+		TitleColour = FLinearColor(0.36f, 0.74f, 0.46f, 1.f);
+		break;
+
+	case EKBRunResult::WipedOut:
+		Title = TEXT("全队阵亡");
+		TitleColour = FLinearColor(0.90f, 0.36f, 0.32f, 1.f);
+		break;
+
+	case EKBRunResult::InProgress:
+	default:
+		// Reachable only if something entered RunOver without naming a result. Naming it rather
+		// than leaving the screen blank is what makes that bug visible instead of silent.
+		Title = TEXT("本局结束");
+		TitleColour = FLinearColor(0.92f, 0.94f, 0.98f, 1.f);
+		break;
+	}
+
+	float TitleWidth = 0.f;
+	float TitleHeight = 0.f;
+	GetTextSize(Title, TitleWidth, TitleHeight, Font, 2.2f);
+	DrawText(Title, TitleColour, CentreX - TitleWidth * 0.5f, CentreY - 150.f, Font, 2.2f, false);
+
+	// This player's own numbers. Read from the local PlayerState rather than the GameState,
+	// because XP and gold are per player.
+	if (const APlayerController* PlayerController = GetOwningPlayerController())
+	{
+		if (const AKBPlayerState* PlayerState = PlayerController->GetPlayerState<AKBPlayerState>())
+		{
+			float LineY = CentreY - 60.f;
+
+			const FString LevelLine = FString::Printf(TEXT("等级 %d"), PlayerState->GetKBLevel());
+			float LineWidth = 0.f;
+			float LineHeight = 0.f;
+			GetTextSize(LevelLine, LineWidth, LineHeight, Font, 1.3f);
+			DrawText(LevelLine, FLinearColor(0.92f, 0.94f, 0.98f, 1.f),
+				CentreX - LineWidth * 0.5f, LineY, Font, 1.3f, false);
+
+			LineY += 40.f;
+			const FString Earnings = FString::Printf(TEXT("经验 %d      金币 %d"),
+				PlayerState->GetXP(), PlayerState->GetGold());
+			GetTextSize(Earnings, LineWidth, LineHeight, Font, 1.1f);
+			DrawText(Earnings, FLinearColor(0.60f, 0.65f, 0.74f, 1.f),
+				CentreX - LineWidth * 0.5f, LineY, Font, 1.1f, false);
+
+			LineY += 46.f;
+			const FString WaveLine = FString::Printf(TEXT("坚持到第 %d 波"), RunState->GetWaveIndex() + 1);
+			GetTextSize(WaveLine, LineWidth, LineHeight, Font, 1.0f);
+			DrawText(WaveLine, FLinearColor(0.38f, 0.42f, 0.50f, 1.f),
+				CentreX - LineWidth * 0.5f, LineY, Font, 1.0f, false);
+		}
+	}
+
+	// Countdown to the lobby. There is no way to skip it and that is deliberate: this is a
+	// co-op run, and letting one player press "continue" would leave the others behind.
+	const float Remaining = FMath::Max(0.f, RunState->GetPhaseEndServerTime() - RunState->GetServerWorldTimeSeconds());
+	const FString Countdown = FString::Printf(TEXT("%.0f 秒后返回大厅…"), Remaining);
+	float CountdownWidth = 0.f;
+	float CountdownHeight = 0.f;
+	GetTextSize(Countdown, CountdownWidth, CountdownHeight, Font, 1.0f);
+	DrawText(Countdown, FLinearColor(0.60f, 0.65f, 0.74f, 1.f),
+		CentreX - CountdownWidth * 0.5f, CentreY + 120.f, Font, 1.0f, false);
+
+	// Where the looted inventory will be listed once 搜 exists. Named here rather than left
+	// blank so the empty state is obviously a missing feature and not a rendering bug.
+	const FString Pending = TEXT("（搜刮到的物品将在后续版本列在这里）");
+	float PendingWidth = 0.f;
+	float PendingHeight = 0.f;
+	GetTextSize(Pending, PendingWidth, PendingHeight, Font, 0.9f);
+	DrawText(Pending, FLinearColor(0.30f, 0.33f, 0.40f, 1.f),
+		CentreX - PendingWidth * 0.5f, CentreY + 160.f, Font, 0.9f, false);
 }
 
 void AKBHud::DrawEnemyHealthBars()

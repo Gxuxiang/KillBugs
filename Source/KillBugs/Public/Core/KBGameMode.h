@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/KBGameState.h"
 #include "GameFramework/GameModeBase.h"
 #include "KBGameMode.generated.h"
 
@@ -31,6 +32,33 @@ public:
 
 	/** Server-only. Called by AKBPlayerController::ServerPickCard. Returns true if applied. */
 	bool ApplyCardChoice(class AKBPlayerState* PlayerState, int32 ChoiceIndex);
+
+	/**
+	 * Ends the run, whatever ended it - a wipe, or (once extraction exists) a successful exit.
+	 *
+	 * The single funnel both endings go through, and the reason it is public: the wipe is detected
+	 * here in Tick, while extraction will be triggered by an actor out in the world, and the two
+	 * must produce exactly the same summary and the same way back to the lobby. If they each did
+	 * their own thing, one of them would drift.
+	 *
+	 * Idempotent. The result is latched on the GameState, so a second call - or a wipe landing in
+	 * the same frame as a successful extraction - is ignored rather than overwriting the verdict.
+	 */
+	void EndRun(EKBRunResult Result);
+
+	/**
+	 * Server-only. Sends everyone back to the lobby once the summary has been read.
+	 *
+	 * Guarded by bReturningToLobby, which is NOT belt-and-braces: ServerTravel does not take
+	 * effect until the current frame ends, so the RunOver branch that calls this keeps running
+	 * for every tick until the world actually changes. Measured in a two-process test, that was
+	 * five ServerTravel calls in the same second. One is the intent; five is a pile of pending
+	 * travels resolving against a world that is already going away.
+	 */
+	void ReturnToLobby();
+
+	/** Latches the first ReturnToLobby; see the note there. */
+	bool bReturningToLobby = false;
 
 protected:
 	/** Monotonic counter feeding AKBPlayerState::KBPlayerIndex. */
@@ -82,5 +110,8 @@ private:
 	bool AreAllPlayersDowned() const;
 
 	/** Brings anyone downed back at full health; called at the start of each wave. */
-	void ReviveDownedPlayers();
+	// ReviveDownedPlayers() used to be here - it stood every downed player back up at the start
+	// of each wave. Rescue is now a teammate standing in the circle a downed player projects
+	// (UKBChannelComponent on AKBCharacter), so there is nothing left for the GameMode to do
+	// about it and the function was deleted.
 };
