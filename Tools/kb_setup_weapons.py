@@ -153,6 +153,18 @@ for name in ("DA_Weapon_AutoRifle", "DA_Weapon_Shockwave", "DA_Weapon_Shotgun"):
 
 log("DONE")
 
+# Said at RUNTIME, not only in the docstring above.
+#
+# This script CREATES the weapon assets, which means it can only run when they are absent - so
+# using it to change one field means deleting them first, and everything this file does not set
+# is silently gone. On 2026-10-05 exactly that happened: the assets were deleted and recreated to
+# add shop prices, and the shotgun came back with no recoil and no fire sound, because those live
+# in kb_setup_weapon_recoil.py and kb_setup_weapon_audio.py. The docstring warned about it; the
+# docstring was read afterwards.
+warn("REMINDER: this script does not set recoil or audio. If you just recreated the weapons, "
+     "run kb_setup_weapon_recoil.py and kb_setup_weapon_audio.py next, or those fields are zero "
+     "and the guns will be silent and kickless.")
+
 try:
     unreal.SystemLibrary.quit_editor()
 except Exception as error:  # noqa: BLE001 - shutdown is best-effort
