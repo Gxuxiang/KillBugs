@@ -510,7 +510,7 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 | 撤离的**排期路径**（第 N 波的 Explore 阶段自动开点、Explore 被撑长） | ✅ 实测（用户在窗口里玩到第 3 波：`Explore: 95s`（不是 90）+ `Extraction zone opened at (4550, 4550)`，位置正是离玩家最远的角） |
 | **虫潮时机**（开点无压力 / 进圈才来一波 / 出圈就停） | ✅ 无头实测（`Extraction started: 30 bugs incoming, then 12/s` 只在第一次进圈时出现一次）；**手感未经人验** |
 | **接触伤害按模型大小**（每只虫各算各的） | ⚠️ **逻辑已改、无头跑过不崩，但"贴脸才掉血"的手感没人验过** |
-| 撤离的**联机** | ✅ 实测（同机双进程窗口：客户端 `Session: joining 192.168.31.153:7777`；客户端 `KBExtractionZone_0: channel active replicated -> ACTIVE/idle` 两次开合都收到；主机上 `KBCharacter_0` **和** `KBCharacter_1` 都被回满 = **闸门把客户端玩家算进来了**；进度读满 → `Run over (extracted)`）。**客户端画面上圈/两个数字/箭头的观感未经人确认** |
+| 撤离的**联机** | ✅ 实测（同机双进程窗口：客户端 `Session: joining 192.168.31.153:7777`；客户端 `KBExtractionZone_0: channel active replicated -> ACTIVE/idle` 两次开合都收到；主机上 `KBCharacter_0` **和** `KBCharacter_1` 都被回满 = **闸门把客户端玩家算进来了**；进度读满 → `Run over (extracted)`）。客户端画面上**圈已确认画得出来**（用户实测）；环下面那行秒数和出画时的边缘箭头没有单独确认 |
 | **引擎侧崩溃（两次，未解释）** | ⚠️ 一次是退出时（`PurgeAllUObjectsOnExit` → `~FEnumProperty`），一次是**加载大厅地图时**（`UNiagaraScript::Serialize` ← `LoadPackage` ← `UEngine::LoadMap`）。**两次的栈里都没有一帧 KillBugs**。改掉清场（186 次假死亡引发的 Niagara 爆发）之后又跑了一局完整流程（撤离 → 回大厅 → 关窗），**两次都没复现**——但样本太少，不能算修好。见「未决问题 13/14」 |
 
 **无头测不到 UI**：`-nullrhi` 下 `DrawHUD` 不执行。能无头证明的只有数据链路和
