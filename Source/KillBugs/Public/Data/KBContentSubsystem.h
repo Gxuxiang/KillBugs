@@ -33,6 +33,15 @@ public:
 	const TArray<TObjectPtr<UKBCardDefinition>>& GetAllCards() const;
 
 	/**
+	 * Every weapon in the game, for the shop's catalogue.
+	 *
+	 * Scanned rather than listed, for the same reason cards are: adding a weapon should be
+	 * authoring an asset. Sorted by DisplayName so the shop's rows - and therefore the indices
+	 * its console commands use - do not depend on the asset registry's ordering.
+	 */
+	const TArray<TObjectPtr<UKBWeaponDefinition>>& GetAllWeapons() const;
+
+	/**
 	 * Server-side. Fills OutChoices with up to CardCount distinct cards this player may take.
 	 *
 	 * Per-player, never a shared pool: four players own different weapons, and a shared pool
@@ -54,4 +63,9 @@ private:
 
 	/** Scans the asset registry for cards. Safe to call repeatedly; fills the mutable cache. */
 	void LoadCards() const;
+
+	UPROPERTY(Transient)
+	mutable TArray<TObjectPtr<UKBWeaponDefinition>> AllWeapons;
+
+	void LoadWeapons() const;
 };

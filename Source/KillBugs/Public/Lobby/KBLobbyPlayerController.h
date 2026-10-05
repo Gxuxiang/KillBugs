@@ -63,6 +63,12 @@ private:
 	/** Routes a click at the lobby's buttons and server rows. */
 	void HandleLobbyClick();
 
+	/** Routes a click at a shop row. Only reached while the shop panel is open. */
+	void HandleShopClick(class AKBLobbyHud* LobbyHud);
+
+	/** The cursor, or the origin when the mouse is not in the viewport. */
+	FVector2D CursorPosition() const;
+
 	/** Builds the click action and its mapping at runtime, as AKBPlayerController does. */
 	void BuildRuntimeInput();
 

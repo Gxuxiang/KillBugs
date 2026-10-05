@@ -13,6 +13,7 @@
 #include "Net/KBSessionSubsystem.h"
 #include "Persistence/KBProfileSubsystem.h"
 #include "UI/KBLobbyHud.h"
+#include "UI/KBShopModel.h"
 
 AKBLobbyPlayerController::AKBLobbyPlayerController()
 {
@@ -196,9 +197,23 @@ void AKBLobbyPlayerController::HandleLobbyClick()
 			}
 			return;
 
+		case EKBLobbyButton::Shop:
+			PlayClickFeedback();
+			LobbyHud->ToggleShop();
+			return;
+
 		default:
 			return;
 		}
+	}
+
+	// The shop takes the click before the server list does. The two never overlap on screen - the
+	// panel shows one or the other - but ordering it explicitly is what stops a click from being
+	// handled twice if that ever changes.
+	if (LobbyHud->IsShopOpen())
+	{
+		HandleShopClick(LobbyHud);
+		return;
 	}
 
 	const int32 RowIndex = LobbyHud->HitTestServerRow(Cursor);
@@ -264,6 +279,75 @@ void AKBLobbyPlayerController::ServerRequestSolo_Implementation()
 	{
 		LobbyGameMode->StartSoloRun();
 	}
+}
+
+void AKBLobbyPlayerController::HandleShopClick(AKBLobbyHud* LobbyHud)
+{
+	const int32 RowIndex = LobbyHud->HitTestShopRow(CursorPosition());
+	const FKBShopRow* Row = LobbyHud->GetShopRow(RowIndex);
+	if (!Row || !Row->bEnabled)
+	{
+		// A click on an inert row is still a click on the shop, so the panel's last message is
+		// cleared rather than left over from a previous attempt.
+		if (Row)
+		{
+			LobbyHud->SetShopMessage(FString());
+		}
+		return;
+	}
+
+	UKBProfileSubsystem* Profile = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+	if (!Profile)
+	{
+		return;
+	}
+
+	// The controller maps a click to a subsystem call and nothing more. The rules - what a
+	// purchase costs, whether the loadout has room, what a wipe takes - all live in the
+	// subsystem, so there is exactly one writer of currency and stash.
+	FString Reason;
+	bool bDone = false;
+
+	switch (Row->Action)
+	{
+	case EKBShopAction::SellAllMaterials:
+		bDone = Profile->TrySellAllMaterials(Reason);
+		break;
+
+	case EKBShopAction::Buy:
+		bDone = Row->Weapon && Profile->TryBuyWeapon(*Row->Weapon, Reason);
+		break;
+
+	case EKBShopAction::Upgrade:
+		bDone = Profile->TryUpgradeWeapon(Row->StashIndex, Reason);
+		break;
+
+	case EKBShopAction::ToggleEquip:
+	{
+		const TArray<FKBSavedWeapon>& Stash = Profile->GetStash();
+		const bool bCurrentlyEquipped =
+			Stash.IsValidIndex(Row->StashIndex) && Stash[Row->StashIndex].bEquipped;
+
+		bDone = Profile->SetWeaponEquipped(Row->StashIndex, !bCurrentlyEquipped, Reason);
+		break;
+	}
+
+	default:
+		return;
+	}
+
+	// Refusals keep their reason on screen; successes say what happened. Both are drawn on the
+	// status line the lobby already has, so no new widget is invented for it.
+	LobbyHud->SetShopMessage(Reason);
+	PlayClickFeedback();
+}
+
+FVector2D AKBLobbyPlayerController::CursorPosition() const
+{
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	return GetMousePosition(MouseX, MouseY) ? FVector2D(MouseX, MouseY) : FVector2D::ZeroVector;
 }
 
 void AKBLobbyPlayerController::ServerSeedGold_Implementation(int32 InGold)

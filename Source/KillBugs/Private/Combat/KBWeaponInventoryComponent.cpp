@@ -11,57 +11,29 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/Pawn.h"
+#include "Engine/GameInstance.h"
+#include "KBGameSettings.h"
 #include "KillBugs.h"
+#include "Persistence/KBProfileSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Swarm/KBEnemyDirector.h"
 #include "UObject/ConstructorHelpers.h"
 
-namespace
-{
-	/**
-	 * Starting loadout, loaded by path so Phase 3 runs with no editor wiring. Replace with a
-	 * designer-editable list (or a run definition) once weapons are granted by cards.
-	 */
-	/**
-	 * Deliberately just these two: one auto and one manual, which is the hybrid the game is
-	 * built around. Everything else is meant to be earned through card drafts, so the very
-	 * first draft has something meaningful to offer.
-	 */
-	const TCHAR* const StartingWeaponPaths[] =
-	{
-		TEXT("/Game/KillBugs/Weapons/DA_Weapon_AutoRifle.DA_Weapon_AutoRifle"),
-		TEXT("/Game/KillBugs/Weapons/DA_Weapon_Shotgun.DA_Weapon_Shotgun")
-	};
-}
-
 UKBWeaponInventoryComponent::UKBWeaponInventoryComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	SetIsReplicatedByDefault(true);
 
-	for (const TCHAR* Path : StartingWeaponPaths)
-	{
-		// Static so the load happens once for the CDO rather than per instance.
-		static TMap<FString, TObjectPtr<UKBWeaponDefinition>> Loaded;
-		TObjectPtr<UKBWeaponDefinition>& Cached = Loaded.FindOrAdd(FString(Path));
-
-		if (!Cached)
-		{
-			Cached = Cast<UKBWeaponDefinition>(
-				StaticLoadObject(UKBWeaponDefinition::StaticClass(), nullptr, Path));
-		}
-
-		if (Cached)
-		{
-			StartingWeapons.Add(Cached);
-		}
-		else
-		{
-			UE_LOG(LogKillBugs, Warning, TEXT("Starting weapon asset missing: %s"), Path);
-		}
-	}
+	// NO hardcoded starting loadout any more.
+	//
+	// There used to be one - a rifle and a shotgun loaded by path - and it has been removed
+	// rather than kept as a fallback, because keeping it would silently cancel the stake the
+	// design asks for: a player who lost every weapon to a wipe would be handed two more on the
+	// next spawn, and the loss would never have meant anything. What a player carries now comes
+	// from exactly one place, their own stash (see BeginPlay), and a player with an empty stash
+	// spawns with nothing.
 }
 
 void UKBWeaponInventoryComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -69,6 +41,54 @@ void UKBWeaponInventoryComponent::GetLifetimeReplicatedProps(TArray<FLifetimePro
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(UKBWeaponInventoryComponent, Weapons);
+}
+
+int32 UKBWeaponInventoryComponent::GetMaxWeaponSlots()
+{
+	// Read at the point of use rather than cached: it is a CDO lookup, and a cached copy would
+	// go stale the moment the setting is changed in the ini.
+	return KBSettings().MaxWeaponSlots;
+}
+
+int32 UKBWeaponInventoryComponent::ApplyLoadout(const TArray<FKBSavedWeapon>& Stash)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return 0;
+	}
+
+	Weapons.Reset();
+
+	for (const FKBSavedWeapon& Entry : Stash)
+	{
+		if (!Entry.bEquipped)
+		{
+			continue;
+		}
+
+		if (Weapons.Num() >= GetMaxWeaponSlots())
+		{
+			break;
+		}
+
+		// LoadSynchronous: this runs once at spawn, and a weapon that is not loaded yet is a
+		// weapon the player cannot fire.
+		UKBWeaponDefinition* Definition = Cast<UKBWeaponDefinition>(Entry.Definition.TryLoad());
+		if (!Definition)
+		{
+			UE_LOG(LogKillBugs, Warning, TEXT("Loadout: could not load '%s' - skipped"),
+				*Entry.Definition.ToString());
+			continue;
+		}
+
+		FKBOwnedWeapon& Added = Weapons.AddDefaulted_GetRef();
+		Added.Definition = Definition;
+		Added.Level = FMath::Clamp(Entry.Level, 1, Definition->MaxLevel);
+		Added.CooldownRemaining = 0.f;
+		Added.LastFireServerTime = -1000.f;
+	}
+
+	return Weapons.Num();
 }
 
 void UKBWeaponInventoryComponent::BeginPlay()
@@ -81,12 +101,29 @@ void UKBWeaponInventoryComponent::BeginPlay()
 		return;
 	}
 
-	for (UKBWeaponDefinition* Weapon : StartingWeapons)
+	// The loadout comes from this machine's own stash, which the player chose in the lobby.
+	//
+	// Machine-local on purpose, and the same shape as gold: the profile lives on the client that
+	// earned it, the inventory it feeds is server-authoritative, and the GameInstance outlives
+	// the travel that destroys PlayerStates, so this is the one point where both are reachable.
+	const UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+	const UKBProfileSubsystem* Profile =
+		GameInstance ? GameInstance->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+
+	if (!Profile)
 	{
-		GrantWeapon(Weapon);
+		// Cannot happen with the shipping GameInstance, and said out loud rather than papered
+		// over with a fallback loadout - a silent grant here is the exact thing that would make
+		// a wipe cost nothing.
+		UE_LOG(LogKillBugs, Warning,
+			TEXT("Weapon inventory: no profile subsystem - spawning with no loadout at all"));
+		return;
 	}
 
-	UE_LOG(LogKillBugs, Display, TEXT("Granted %d starting weapon(s)"), Weapons.Num());
+	const int32 Equipped = ApplyLoadout(Profile->GetStash());
+
+	UE_LOG(LogKillBugs, Display, TEXT("Loadout: %d weapon(s) carried in (%d owned)"),
+		Equipped, Profile->GetStash().Num());
 	for (const FKBOwnedWeapon& Weapon : Weapons)
 	{
 		UE_LOG(LogKillBugs, Display, TEXT("    %s  %s / %s  dmg %.1f @ %.2fs"),
@@ -174,7 +211,7 @@ bool UKBWeaponInventoryComponent::GrantWeapon(UKBWeaponDefinition* Definition)
 		}
 	}
 
-	if (Weapons.Num() >= MaxWeaponSlots)
+	if (Weapons.Num() >= GetMaxWeaponSlots())
 	{
 		return false;
 	}

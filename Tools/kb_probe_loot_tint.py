@@ -43,8 +43,27 @@ def report(path):
     except Exception:
         pass
 
+    # A material that cannot be used by an InstancedStaticMeshComponent is substituted by the
+    # default material, silently - the component renders, the colour does not. Having a `Color`
+    # parameter is therefore only half the question.
+    ism = "?"
+    try:
+        ism = material.get_editor_property("used_with_instanced_static_meshes")
+    except Exception:
+        pass
+
     print(PREFIX + "{}".format(path))
     print(PREFIX + "    domain={}  vectors={}  scalars={}".format(domain, list(vectors), list(scalars)))
+    print(PREFIX + "    used_with_instanced_static_meshes={}".format(ism))
+
+    # What the engine's placeholder cube actually carries, which is NOT what BasicShapeMaterial is.
+    mesh = unreal.load_asset("/Engine/BasicShapes/Cube.Cube")
+    if mesh is not None:
+        try:
+            slot_material = mesh.get_editor_property("static_materials")
+            print(PREFIX + "    Cube.Cube static_materials={}".format(slot_material))
+        except Exception as error:
+            print(PREFIX + "    Cube.Cube materials unreadable ({})".format(error))
 
 
 def scan_project():

@@ -1,6 +1,7 @@
 #include "Core/KBPlayerController.h"
 
 #include "Audio/KBAudioSubsystem.h"
+#include "Combat/KBWeaponInventoryComponent.h"
 #include "Core/KBGameMode.h"
 #include "Core/KBGameState.h"
 #include "Core/KBPlayerState.h"
@@ -165,17 +166,48 @@ void AKBPlayerController::HandleRunResultChanged(EKBRunResult NewResult)
 
 	const int32 Carried = KBPlayerState->GetMaterials();
 
+	// What the player is holding right now, which is the loadout plus anything cards handed out
+	// during the run. Read here because it is the last moment it exists: the travel home destroys
+	// the pawn, and with it the inventory.
+	TArray<FKBSavedWeapon> CarriedWeapons;
+	if (const APawn* LocalPawn = GetPawn())
+	{
+		if (const UKBWeaponInventoryComponent* Inventory =
+			LocalPawn->FindComponentByClass<UKBWeaponInventoryComponent>())
+		{
+			for (const FKBOwnedWeapon& Weapon : Inventory->GetWeapons())
+			{
+				if (!Weapon.Definition)
+				{
+					continue;
+				}
+
+				FKBSavedWeapon& Entry = CarriedWeapons.AddDefaulted_GetRef();
+				Entry.Definition = FSoftObjectPath(Weapon.Definition);
+				Entry.Level = Weapon.Level;
+				Entry.bEquipped = true;
+			}
+		}
+	}
+
 	if (NewResult == EKBRunResult::Extracted)
 	{
 		Profile->BankRunMaterials(Carried);
+
+		// Weapons are the one thing that goes both ways: carried out, they are yours - including
+		// the ones a card handed you in there, and including the levels they gained.
+		Profile->ApplyExtractedWeapons(CarriedWeapons);
 		return;
 	}
 
-	// The wipe. Nothing to do - the PlayerState and its materials are destroyed by the travel
-	// home - but silence here would be the wrong kind of quiet: the player lost something the
-	// design says they were supposed to lose, and the log is where that becomes visible.
+	// The wipe. Materials are simply gone with the PlayerState, but the weapons have to be taken
+	// OUT of the stash, because that is where they live between runs - and they are the thing the
+	// design says a wipe costs you.
+	Profile->LoseCarriedWeapons();
+
 	UE_LOG(LogKillBugs, Display,
-		TEXT("KBProfile: wiped out - %d carried material(s) lost, not banked"), Carried);
+		TEXT("KBProfile: wiped out - %d carried material(s) and %d carried weapon(s) lost, not banked"),
+		Carried, CarriedWeapons.Num());
 }
 
 void AKBPlayerController::BuildRuntimeInput()

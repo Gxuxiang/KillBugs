@@ -9,9 +9,11 @@
 #include "GameFramework/PlayerController.h"
 #include "KBGameSettings.h"
 #include "KillBugs.h"
+#include "Data/KBContentSubsystem.h"
 #include "Lobby/KBLobbyGameState.h"
 #include "Net/KBSessionSubsystem.h"
 #include "Persistence/KBProfileSubsystem.h"
+#include "UI/KBShopModel.h"
 
 /**
  * Named, NOT anonymous, and every use is qualified through the Style alias below.
@@ -132,6 +134,8 @@ void AKBLobbyHud::DrawHUD()
 	// without telling the HUD, and a stale rect is a click that lands on the wrong thing.
 	ButtonRects.Init(FBox2D(), static_cast<int32>(EKBLobbyButton::Count));
 	ServerRowRects.Reset();
+	ShopRows.Reset();
+	ShopRowRects.Reset();
 
 	// Read once, so every hover test this frame agrees with every other one.
 	float MouseX = 0.f;
@@ -167,8 +171,20 @@ void AKBLobbyHud::DrawHUD()
 	DrawPanel(Panel, Style::PanelFill);
 
 	DrawTitle(Panel);
-	DrawServerList(Panel);
-	DrawPlayerList(Panel);
+
+	// The panel body swaps; the frame around it - title, stash line, status, buttons - does not
+	// move. That is the same trick the loading screen uses, and it is what keeps the shop from
+	// feeling like a different screen.
+	if (bShopOpen)
+	{
+		DrawShop(Panel);
+	}
+	else
+	{
+		DrawServerList(Panel);
+		DrawPlayerList(Panel);
+	}
+
 	DrawStatusLine(Panel);
 	DrawButtons(Panel);
 
@@ -185,6 +201,7 @@ void AKBLobbyHud::UpdateHoverSound()
 	// Buttons first: a row that slid under one would otherwise steal the cue.
 	int32 HoveredButton = INDEX_NONE;
 	int32 HoveredRow = INDEX_NONE;
+	int32 HoveredShopRow = INDEX_NONE;
 
 	if (bHasMouse)
 	{
@@ -208,17 +225,33 @@ void AKBLobbyHud::UpdateHoverSound()
 				}
 			}
 		}
+
+		// Only when the shop is up: its rects are stale the rest of the time, and a cue for a
+		// row nobody can see is worse than no cue.
+		if (HoveredButton == INDEX_NONE && HoveredRow == INDEX_NONE && bShopOpen)
+		{
+			for (int32 Index = 0; Index < ShopRowRects.Num(); ++Index)
+			{
+				if (ShopRowRects[Index].IsInside(MousePosition))
+				{
+					HoveredShopRow = Index;
+					break;
+				}
+			}
+		}
 	}
 
-	if (HoveredButton == LastHoveredButton && HoveredRow == LastHoveredRow)
+	if (HoveredButton == LastHoveredButton && HoveredRow == LastHoveredRow
+		&& HoveredShopRow == LastHoveredShopRow)
 	{
 		return;
 	}
 
 	LastHoveredButton = HoveredButton;
 	LastHoveredRow = HoveredRow;
+	LastHoveredShopRow = HoveredShopRow;
 
-	if (HoveredButton == INDEX_NONE && HoveredRow == INDEX_NONE)
+	if (HoveredButton == INDEX_NONE && HoveredRow == INDEX_NONE && HoveredShopRow == INDEX_NONE)
 	{
 		return;
 	}
@@ -284,6 +317,94 @@ void AKBLobbyHud::DrawStash(const FBox2D& Panel, float RuleY)
 	// Right-aligned on the title rule, level with the title.
 	DrawText(Line, Style::Dim, Panel.Max.X - Style::Pad - Width, Panel.Min.Y + Style::Pad + 4.f,
 		Font, 1.0f, false);
+}
+
+void AKBLobbyHud::DrawShop(const FBox2D& Panel)
+{
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font)
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	const UKBProfileSubsystem* Profile =
+		GameInstance ? GameInstance->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+	const UKBContentSubsystem* Content =
+		GameInstance ? GameInstance->GetSubsystem<UKBContentSubsystem>() : nullptr;
+
+	if (!Profile || !Content)
+	{
+		DrawText(TEXT("商店数据不可用"), Style::Bad, Panel.Min.X + Style::Pad,
+			Panel.Min.Y + Style::Pad + 80.f, Font, 1.0f, false);
+		return;
+	}
+
+	// Built ONCE, and both drawn and hit-tested from this one array. Building it twice is how a
+	// shop ends up selling you the row above the one you clicked.
+	BuildShopRows(*Profile, *Content, ShopRows);
+
+	const float Left = Panel.Min.X + Style::Pad;
+	const float Width = Style::PanelWidth - Style::Pad * 2.f;
+	const float Top = Panel.Min.Y + Style::Pad + 70.f;
+
+	DrawText(FString::Printf(TEXT("商店　（点击一行执行；带进去的武器团灭会掉）")),
+		Style::Dim, Left, Top - 28.f, Font, 0.95f, false);
+
+	const int32 Visible = FMath::Min(ShopRows.Num(), Style::MaxVisibleRows);
+
+	for (int32 Index = 0; Index < Visible; ++Index)
+	{
+		const FKBShopRow& Row = ShopRows[Index];
+		const float RowY = Top + Index * (Style::RowHeight + Style::RowGap);
+		const FBox2D RowRect(FVector2D(Left, RowY), FVector2D(Left + Width, RowY + Style::RowHeight));
+
+		const bool bHovered = IsHovered(RowRect);
+		DrawRect(Row.bEnabled
+			? (bHovered ? Style::RowHover : Style::RowFill)
+			: Style::ButtonDead,
+			RowRect.Min.X, RowRect.Min.Y, RowRect.Max.X - RowRect.Min.X, RowRect.Max.Y - RowRect.Min.Y);
+
+		DrawText(Row.Label, Row.bEnabled ? Style::Ink : Style::Faint,
+			RowRect.Min.X + Style::Pad, RowY + Style::RowHeight * 0.5f - 10.f, Font, 1.0f, false);
+
+		// Right-aligned so the costs line up in a column and can be compared down the list.
+		float RightWidth = 0.f;
+		float RightHeight = 0.f;
+		GetTextSize(Row.RightLabel, RightWidth, RightHeight, Font, 1.0f);
+
+		DrawText(Row.RightLabel, Row.bEnabled ? Row.RightColour : Style::Faint,
+			RowRect.Max.X - Style::Pad - RightWidth, RowY + Style::RowHeight * 0.5f - 10.f,
+			Font, 1.0f, false);
+
+		ShopRowRects.Add(RowRect);
+	}
+
+	if (ShopRows.Num() > Style::MaxVisibleRows)
+	{
+		DrawText(FString::Printf(TEXT("… 另有 %d 行"), ShopRows.Num() - Style::MaxVisibleRows),
+			Style::Faint, Left, Top + Style::MaxVisibleRows * (Style::RowHeight + Style::RowGap) + 6.f,
+			Font, 0.95f, false);
+	}
+}
+
+int32 AKBLobbyHud::HitTestShopRow(const FVector2D& ScreenPosition) const
+{
+	for (int32 Index = 0; Index < ShopRowRects.Num(); ++Index)
+	{
+		if (ShopRowRects[Index].IsInside(ScreenPosition))
+		{
+			return Index;
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+const FKBShopRow* AKBLobbyHud::GetShopRow(int32 Index) const
+{
+	return ShopRows.IsValidIndex(Index) ? &ShopRows[Index] : nullptr;
 }
 
 void AKBLobbyHud::DrawLoadingScreen()
@@ -482,6 +603,16 @@ void AKBLobbyHud::DrawStatusLine(const FBox2D& Panel)
 
 	DrawText(Style::StateLabel(State), Style::StateColour(State), Left, Y, Font, 0.95f, false);
 
+	// Why the last shop action did or did not happen, on the line that already carries the
+	// lobby's own errors. One status line, two sources - rather than a second place to look.
+	if (!ShopMessage.IsEmpty())
+	{
+		float MessageWidth = 0.f;
+		float MessageHeight = 0.f;
+		GetTextSize(Style::StateLabel(State), MessageWidth, MessageHeight, Font, 0.95f);
+		DrawText(ShopMessage, Style::Ink, Left + MessageWidth + Style::ColumnGap, Y, Font, 0.95f, false);
+	}
+
 	// The ready tally, right-aligned on the same line. The player list already marks each
 	// player individually, but "2/2 ready" is the one number that answers "why is 开始游戏 still
 	// grey" without counting ticks down a list.
@@ -554,6 +685,10 @@ void AKBLobbyHud::DrawButtons(const FBox2D& Panel)
 		{ EKBLobbyButton::Start, TEXT("开始游戏"), bHosting && !bBusy && bAllReady },
 		{ EKBLobbyButton::Solo,  TEXT("单机开始"), bOffline && !bHosting },
 		{ EKBLobbyButton::Leave, TEXT("离开房间"), bInRoom },
+
+		// Always available, room or not: what you own and what you bring is yours either way, and
+		// the shop is also the only way to look at the stash before deciding to host or join.
+		{ EKBLobbyButton::Shop,  bShopOpen ? TEXT("返回") : TEXT("商店"), true },
 	};
 
 	const int32 ButtonCount = UE_ARRAY_COUNT(Specs);

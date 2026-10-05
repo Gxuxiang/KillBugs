@@ -1,8 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Persistence/KBStashTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "KBProfileSubsystem.generated.h"
+
+class UKBWeaponDefinition;
 
 /**
  * The local player's persistent profile - what survives after the world it was earned in is gone.
@@ -40,6 +43,59 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Profile")
 	int32 GetBankedMaterials() const { return BankedMaterials; }
+
+	/** The owned weapons, with their levels and which of them are chosen for the next run. */
+	const TArray<FKBSavedWeapon>& GetStash() const { return Stash; }
+
+	/** Index into GetStash() for this weapon, or INDEX_NONE. Matched by path, not by pointer. */
+	int32 FindStashIndex(const UKBWeaponDefinition& Definition) const;
+
+	int32 GetStashLevel(const UKBWeaponDefinition& Definition) const;
+
+	/**
+	 * The two weapons a brand new profile starts with, as asset paths.
+	 *
+	 * Handed out exactly ONCE - when there is no save file on disk at all - because a player with
+	 * no weapon cannot play. It is deliberately NOT a fallback for "the stash is empty": losing
+	 * your last weapon to a wipe is the stake the design asks for, and re-granting here would
+	 * quietly cancel it.
+	 */
+	static const TArray<FSoftObjectPath>& GetStarterWeaponPaths();
+
+	// ---- Shop -------------------------------------------------------------------------------
+	//
+	// These four are the ONLY writers of the bank and the stash, so that the rules - what a
+	// purchase costs, what a wipe takes - live in one place and the UI only asks. Each returns
+	// false with a reason a player can read, and saves only when it changed something.
+
+	bool TryBuyWeapon(const UKBWeaponDefinition& Definition, FString& OutReason);
+	bool TryUpgradeWeapon(int32 StashIndex, FString& OutReason);
+	bool TrySellAllMaterials(FString& OutReason);
+	bool SetWeaponEquipped(int32 StashIndex, bool bEquipped, FString& OutReason);
+
+	/**
+	 * What came home from an extraction: the weapons the player was holding at the end.
+	 *
+	 * Those levels stick (a card that upgraded a carried weapon during the run is kept), any
+	 * weapon that was not in the stash before is added by having been carried out, and the whole
+	 * set becomes the loadout. Weapons left at home are untouched.
+	 */
+	void ApplyExtractedWeapons(const TArray<FKBSavedWeapon>& CarriedOut);
+
+	/**
+	 * A wipe took everything that was brought in. Called on the local machine.
+	 *
+	 * The snapshot is taken by BeginRun rather than inferred now, because by this point the
+	 * arena's inventory holds card-granted weapons too and there would be no way to tell which of
+	 * them the player actually owned and carried.
+	 */
+	void LoseCarriedWeapons();
+
+	/** Debug: puts currency straight into the bank. `KB.Profile.Grant`. */
+	void AddBankedForDebug(int32 Gold, int32 Materials);
+
+	/** Re-reads the save from disk. `KB.Profile.Reload`, for testing persistence in one process. */
+	void ReloadProfile();
 
 	/** Called when this machine enters a fresh arena, so the once-per-run fold can happen again. */
 	void BeginRun();
@@ -85,6 +141,9 @@ private:
 	/** Reads the profile off disk, or starts at zero. Never fails - a bad profile is a fresh one. */
 	void LoadProfile();
 
+	/** Puts the two starter weapons in the stash. Only ever called for a profile with no past. */
+	void SeedStarterWeapons();
+
 	/** Writes the bank to disk. Returns whether the write landed. */
 	bool SaveProfile() const;
 
@@ -93,6 +152,12 @@ private:
 
 	/** Materials brought home by successful extractions. */
 	int32 BankedMaterials = 0;
+
+	/** Owned weapons. Shrinks on a wipe, grows on a purchase or a successful extraction. */
+	TArray<FKBSavedWeapon> Stash;
+
+	/** What the current run set out with. See LoseCarriedWeapons. */
+	TArray<FSoftObjectPath> CarriedThisRun;
 
 	/** Whether this run's earnings have already been banked. Cleared by BeginRun. */
 	bool bBankedThisRun = false;

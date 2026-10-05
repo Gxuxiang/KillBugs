@@ -10,6 +10,7 @@
 namespace
 {
 	const TCHAR* const CardSearchPath = TEXT("/Game/KillBugs/Cards");
+const TCHAR* const WeaponSearchPath = TEXT("/Game/KillBugs/Weapons");
 
 	/** Rarity is expressed as a divisor on draw weight, so Common needs no special case. */
 	float GetRarityWeightMultiplier(EKBCardRarity Rarity)
@@ -44,6 +45,55 @@ const TArray<TObjectPtr<UKBCardDefinition>>& UKBContentSubsystem::GetAllCards() 
 	}
 
 	return AllCards;
+}
+
+const TArray<TObjectPtr<UKBWeaponDefinition>>& UKBContentSubsystem::GetAllWeapons() const
+{
+	// Same lazy-rescan contract as cards, and the same reason: the registry may not have been
+	// ready the first time, and scanning in Initialize would find nothing and look like "this
+	// project has no weapons".
+	if (AllWeapons.Num() == 0)
+	{
+		LoadWeapons();
+	}
+
+	return AllWeapons;
+}
+
+void UKBContentSubsystem::LoadWeapons() const
+{
+	AllWeapons.Reset();
+
+	FAssetRegistryModule& AssetRegistryModule =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UKBWeaponDefinition::StaticClass()->GetClassPathName());
+	Filter.PackagePaths.Add(FName(WeaponSearchPath));
+	Filter.bRecursivePaths = true;
+
+	TArray<FAssetData> Found;
+	AssetRegistryModule.Get().GetAssets(Filter, Found);
+
+	for (const FAssetData& AssetData : Found)
+	{
+		if (UKBWeaponDefinition* Weapon = Cast<UKBWeaponDefinition>(AssetData.GetAsset()))
+		{
+			AllWeapons.Add(Weapon);
+		}
+	}
+
+	// Sorted, because the shop draws them in this order and its console commands index into it -
+	// an order that shifts between runs would make "buy catalogue index 2" mean different things.
+	// The predicate takes the DEREFERENCED objects, not the pointers: TArray::Sort wraps it for
+	// arrays of pointers and hands out references to what they point at.
+	AllWeapons.Sort([](const UKBWeaponDefinition& A, const UKBWeaponDefinition& B)
+	{
+		return A.DisplayName.ToString() < B.DisplayName.ToString();
+	});
+
+	UE_LOG(LogKillBugs, Display, TEXT("Content: found %d weapon(s) under %s"),
+		AllWeapons.Num(), WeaponSearchPath);
 }
 
 void UKBContentSubsystem::LoadCards() const
@@ -104,7 +154,7 @@ bool UKBContentSubsystem::IsCardEligible(const AKBPlayerState& PlayerState,
 			return false; // already owned; its upgrade card is the one to offer
 		}
 
-		return Inventory->GetWeapons().Num() < Inventory->MaxWeaponSlots;
+		return Inventory->GetWeapons().Num() < UKBWeaponInventoryComponent::GetMaxWeaponSlots();
 	}
 
 	case EKBCardEffect::UpgradeWeapon:

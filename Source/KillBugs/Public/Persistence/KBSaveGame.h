@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/SaveGame.h"
+#include "Persistence/KBStashTypes.h"
 #include "KBSaveGame.generated.h"
 
 /**
@@ -22,7 +23,7 @@ class KILLBUGS_API UKBSaveGame : public USaveGame
 
 public:
 	/** The current on-disk layout. Bump when a field is added or its meaning changes. */
-	static constexpr int32 CurrentVersion = 2;
+	static constexpr int32 CurrentVersion = 3;
 
 	/** The persisted total, across every run this machine has ever finished. */
 	UPROPERTY()
@@ -40,6 +41,20 @@ public:
 	 */
 	UPROPERTY()
 	int32 Materials = 0;
+
+	/**
+	 * The weapons this machine owns, and which of them are chosen for the next run.
+	 *
+	 * A wipe REMOVES the ones that were carried in - the design's "takes everything you brought,
+	 * gear included" - so this list can shrink, and it can end up empty with nothing to fall back
+	 * on. There is deliberately no "you always have a starter" rule anywhere past the very first
+	 * profile: any such rule would quietly undo the stake.
+	 *
+	 * A v2 file (gold and materials) loads with this empty, which is correct for it - that build
+	 * had no stash at all.
+	 */
+	UPROPERTY()
+	TArray<FKBSavedWeapon> Stash;
 
 	UPROPERTY()
 	int32 SaveVersion = CurrentVersion;

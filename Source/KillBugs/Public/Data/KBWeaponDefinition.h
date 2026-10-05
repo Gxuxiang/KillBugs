@@ -195,4 +195,45 @@ public:
 	{
 		return FMath::Max(0.05f, BaseCooldown + CooldownPerLevel * FMath::Max(0, Level - 1));
 	}
+
+	// ---- Economy --------------------------------------------------------------------------
+	//
+	// Per-weapon numbers live on the weapon, the way the stat curves above already do. The one
+	// value that is NOT per-weapon - materials to gold - is a global setting instead.
+
+	/**
+	 * Gold to own this weapon.
+	 *
+	 * ZERO MEANS NOT FOR SALE, not free. A free default is indistinguishable from a designer who
+	 * forgot to fill it in, and a weapon that costs nothing is a hole rather than a feature. An
+	 * unpriced weapon simply does not appear in the shop.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "经济",
+		meta = (ClampMin = "0", UIMax = "100000",
+			ToolTip = "买下这把武器要多少金币。\n\n【0 表示不出售】——不是免费。免费和“忘了填”从外面看一模一样，\n而未标价的武器干脆不出现在商店里。"))
+	int32 BuyPriceGold = 0;
+
+	/** Materials for the first upgrade (level 1 -> 2). Zero means the weapon cannot be crafted. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "经济",
+		meta = (ClampMin = "0", UIMax = "10000",
+			ToolTip = "从 1 级升到 2 级要多少材料。【0 表示不可合成】。"))
+	int32 BaseUpgradeCost = 0;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "经济",
+		meta = (ClampMin = "0", UIMax = "10000",
+			ToolTip = "每升一级，材料成本增加多少。\n\n和伤害曲线同一个道理：越往后越贵，所以升级是个要选的投入，不是刷材料就能填满的东西。"))
+	int32 UpgradeCostPerLevel = 0;
+
+	/** Materials to take this weapon from CurrentLevel to CurrentLevel + 1. */
+	int32 GetUpgradeCost(int32 CurrentLevel) const
+	{
+		return BaseUpgradeCost + UpgradeCostPerLevel * FMath::Max(0, CurrentLevel - 1);
+	}
+
+	bool IsForSale() const { return BuyPriceGold > 0; }
+
+	bool IsCraftableAt(int32 CurrentLevel) const
+	{
+		return CurrentLevel < MaxLevel && GetUpgradeCost(CurrentLevel) > 0;
+	}
 };

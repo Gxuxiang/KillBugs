@@ -94,6 +94,10 @@ make_weapon(
     projectile_speed=2600.0,
     projectiles_per_shot=1,
     tracer_color=unreal.LinearColor(1.0, 0.85, 0.3, 1.0),
+    # The two starters are owned from the first launch, so their price is never paid - but a
+    # price is still set, because a weapon with no price is a weapon the shop refuses to show,
+    # and "can I buy this back if I lose it" should have an answer.
+    buy_price_gold=250, base_upgrade_cost=8, upgrade_cost_per_level=4,
 )
 
 # --- Shockwave: auto, but area. Rewards letting the swarm bunch up. ----------------------
@@ -108,6 +112,7 @@ make_weapon(
     max_level=8,
     range=800.0, radial_radius=260.0,
     tracer_color=unreal.LinearColor(0.4, 0.7, 1.0, 1.0),
+    buy_price_gold=600, base_upgrade_cost=15, upgrade_cost_per_level=8,
 )
 
 # --- Shotgun: the manual half of the hybrid. Player aims it and holds the trigger. -------
@@ -128,6 +133,7 @@ make_weapon(
     spread_degrees=24.0,
     projectile_speed=1700.0,
     tracer_color=unreal.LinearColor(1.0, 0.55, 0.2, 1.0),
+    buy_price_gold=250, base_upgrade_cost=8, upgrade_cost_per_level=4,
 )
 
 log("--- weapons ---")

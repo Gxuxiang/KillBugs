@@ -27,6 +27,8 @@ enum class EKBLobbyButton : uint8
 	Solo,
 	/** Drop the room and come back here. */
 	Leave,
+	/** Show the shop, or go back to the lobby proper. */
+	Shop,
 
 	Count,
 };
@@ -60,6 +62,21 @@ public:
 	/** Index into the session subsystem's search results, or INDEX_NONE. */
 	int32 HitTestServerRow(const FVector2D& ScreenPosition) const;
 
+	/** Index into the drawn shop rows, or INDEX_NONE. */
+	int32 HitTestShopRow(const FVector2D& ScreenPosition) const;
+
+	/** The row at that index, or null. Read after a hit test to learn what was clicked. */
+	const struct FKBShopRow* GetShopRow(int32 Index) const;
+
+	bool IsShopOpen() const { return bShopOpen; }
+
+	/** Opens or closes the shop. The panel body swaps; the frame around it does not move. */
+	void ToggleShop() { bShopOpen = !bShopOpen; ShopMessage.Reset(); }
+
+	/** Why the last click was refused, drawn on the existing status line. */
+	const FString& GetShopMessage() const { return ShopMessage; }
+	void SetShopMessage(const FString& InMessage) { ShopMessage = InMessage; }
+
 private:
 	/** The session subsystem, or null during teardown. */
 	UKBSessionSubsystem* GetSessions() const;
@@ -69,6 +86,15 @@ private:
 	/** This machine's banked totals, in the title bar. */
 	void DrawStash(const FBox2D& Panel, float RuleY);
 	void DrawServerList(const FBox2D& Panel);
+
+	/**
+	 * The shop, drawn in the space the room list and player list occupy.
+	 *
+	 * A mode switch rather than an overlay or a bigger panel: the same panel changing what it
+	 * shows is already how the loading screen works, and keeping the geometry means the title,
+	 * the stash line, the status line and the buttons do not move when the shop opens.
+	 */
+	void DrawShop(const FBox2D& Panel);
 	void DrawPlayerList(const FBox2D& Panel);
 	void DrawButtons(const FBox2D& Panel);
 	void DrawStatusLine(const FBox2D& Panel);
@@ -105,6 +131,21 @@ private:
 	/** Screen-space rectangles of the server rows, in the same order as the search results. */
 	TArray<FBox2D> ServerRowRects;
 
+	/** True while the panel is showing the shop instead of the room and player lists. */
+	bool bShopOpen = false;
+
+	/**
+	 * The shop's rows and their rectangles, in the same order.
+	 *
+	 * Both rebuilt once per frame from one BuildShopRows call, so the row drawn and the row hit
+	 * are the same object rather than two lists that have to be kept in step.
+	 */
+	TArray<struct FKBShopRow> ShopRows;
+	TArray<FBox2D> ShopRowRects;
+
+	/** Why the last shop click was refused. Drawn on the status line the lobby already has. */
+	FString ShopMessage;
+
 	/** Cursor position for this frame, read once so every hit test agrees. */
 	FVector2D MousePosition = FVector2D::ZeroVector;
 	bool bHasMouse = false;
@@ -118,4 +159,5 @@ private:
 	 */
 	int32 LastHoveredButton = INDEX_NONE;
 	int32 LastHoveredRow = INDEX_NONE;
+	int32 LastHoveredShopRow = INDEX_NONE;
 };

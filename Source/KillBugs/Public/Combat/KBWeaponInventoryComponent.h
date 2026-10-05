@@ -89,12 +89,28 @@ public:
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Weapons")
 	float GetCooldownFraction(int32 WeaponIndex) const;
 
-	/** Weapons every player starts with. Loaded by path so Phase 3 needs no editor setup. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "KillBugs|Weapons")
-	TArray<TObjectPtr<UKBWeaponDefinition>> StartingWeapons;
+	// StartingWeapons used to live here - a hardcoded rifle-plus-shotgun loadout. It is gone
+	// rather than kept as a fallback: the stash is the only source of what a player carries, and
+	// a hardcoded floor under it would quietly cancel the cost of a wipe.
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "KillBugs|Weapons")
-	int32 MaxWeaponSlots = 6;
+	/**
+	 * How many weapons can be carried at once.
+	 *
+	 * Was an EditDefaultsOnly member, which on a code-created component is not editable anywhere -
+	 * and the shop now needs the same number to bound the loadout, so it moved to UKBGameSettings
+	 * where every other design value lives. One source, read through here.
+	 */
+	static int32 GetMaxWeaponSlots();
+
+	/**
+	 * Server-only. Replaces the whole weapon list with the stash entries marked equipped.
+	 *
+	 * Deliberately not built on GrantWeapon: that can only add a weapon or bump a level by one,
+	 * and a loadout needs both things it cannot do - set an absolute level (a weapon carried at
+	 * level 4) and remove what is there (so a re-apply does not stack). Returns how many were
+	 * carried in, which is zero for a player who owns nothing.
+	 */
+	int32 ApplyLoadout(const TArray<struct FKBSavedWeapon>& Stash);
 
 protected:
 	/** Replicated so the HUD can show slots and levels; cooldowns stay server-side. */
