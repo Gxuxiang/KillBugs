@@ -23,20 +23,31 @@ PREFIX = "[KBWeaponAudio] "
 # are built from.
 #
 # Pitch is what tells the two guns apart while sharing one asset: lower reads as heavier.
+# The fire sounds are the project's OWN (Content/KillBugs/Sound/MS_Fire*.uasset), not pack
+# presets.
+#
+# This script used to point both guns at /Game/SoundMorphMetaSounds/Gun/Sources/BasicGun, with the
+# shotgun pitched down to 0.7 to tell them apart - which is exactly what a placeholder sounds
+# like: one gun, twice. The user heard it, said "音量/音色不对", and named the two assets this now
+# uses. MS_Fire is the rifle, MS_Fire1 the shotgun.
 ASSIGNMENTS = [
     (
         "/Game/KillBugs/Weapons/DA_Weapon_AutoRifle",
-        "/Game/SoundMorphMetaSounds/Gun/Sources/BasicGun",
+        "/Game/KillBugs/Sound/MS_Fire",
         1.0,
         "/Game/SoundMorphMetaSounds/Wooshes/WooshMaker/Samples/3_impact_complextechhits",
     ),
     (
         "/Game/KillBugs/Weapons/DA_Weapon_Shotgun",
-        "/Game/SoundMorphMetaSounds/Gun/Sources/BasicGun",
-        0.7,
+        "/Game/KillBugs/Sound/MS_Fire1",
+        # 1.0 now: the 0.7 was there to disguise two guns sharing one source, and they no longer do.
+        1.0,
         "/Game/SoundMorphMetaSounds/Wooshes/WooshMaker/Samples/3_impact_blasts_rubblerebel",
     ),
     (
+        # Still a pack preset: the project has exactly two weapon fire sounds, and neither is a
+        # radial blast. Left alone rather than guessed at - a shockwave is the one weapon whose
+        # sound has a plausible reason to be an explosion.
         "/Game/KillBugs/Weapons/DA_Weapon_Shockwave",
         "/Game/SoundMorphMetaSounds/Explosion/Presets/Explosion_Preset_1",
         1.0,
