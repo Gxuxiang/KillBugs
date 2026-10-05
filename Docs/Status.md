@@ -504,14 +504,14 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 | **队友的血条** | ✅ 用户已确认（左下角 `AKBHud::DrawPartyStatus`） |
 | **撤离：整条状态机**（开点 → 窗口耗尽后这局继续 → 全员进圈冻结并读条 → 有人离开进度保留而窗口续走 → 读满撤离成功） | ✅ 实测（无头 `KB.Extract.SelfTest`，一条命令走完五种情形，日志逐条可对，见本轮） |
 | **撤离成功后回大厅** | ✅ 实测（`Run over (extracted)` → summary → `travelling back to the lobby` → 大厅起来） |
-| **一局结束后世界立刻停下**（冻住虫群 + 锁住玩家 + 停火） | ✅ 无头实测（`Run over: 26 bug(s) frozen in place`、之后零条 `Bullet #`/`FireFeedback`、回大厅照常）；**画面观感未经人验** |
+| **一局结束后世界立刻停下**（冻住虫群 + 锁住玩家 + 停火） | ✅ 实测（无头：`frozen in place` + 之后零条 `Bullet #`；实机：110 只原地冻住、回大厅干净、退出干净）。**"冻住不消失"的观感用户已确认** |
 | **倒地者不再自动开火**（顺带修掉的旧 bug） | ⚠️ 逻辑上已堵住（同一条判断），但**没有人专门验过倒地场景** |
 | 撤离的**画面**（地面圆环、两个数字、边缘箭头、预告文字） | ❌ **没有任何人看过**。`-nullrhi` 下 `DrawHUD` 不执行，必须开窗口跑一次 |
 | 撤离的**排期路径**（第 N 波的 Explore 阶段自动开点、Explore 被撑长） | ✅ 实测（用户在窗口里玩到第 3 波：`Explore: 95s`（不是 90）+ `Extraction zone opened at (4550, 4550)`，位置正是离玩家最远的角） |
 | **虫潮时机**（开点无压力 / 进圈才来一波 / 出圈就停） | ✅ 无头实测（`Extraction started: 30 bugs incoming, then 12/s` 只在第一次进圈时出现一次）；**手感未经人验** |
 | **接触伤害按模型大小**（每只虫各算各的） | ⚠️ **逻辑已改、无头跑过不崩，但"贴脸才掉血"的手感没人验过** |
 | 撤离的**联机**（客户端看得到圈和两个数字） | ❌ 未测。数据链路都复制（`ZoneCentre`/`ZoneRadius`/`OpenWindowRemaining` + 通道的 `Progress`/`bAdvancing`），但没人验过 |
-| **退出时的引擎崩溃**（`PurgeAllUObjectsOnExit` → `~FEnumProperty`） | ⚠️ **未解释**。只出现过一次（09:14 那局，7 分钟、开过撤离点），同一天的短会话和昨天同类的长会话都是干净的 `LogExit: Exiting.`。栈全在 `CoreUObject` 里，没有一帧 KillBugs。影响是"关窗时崩"，玩的时候完全正常。见「未决问题」 |
+| **引擎侧崩溃（两次，未解释）** | ⚠️ 一次是退出时（`PurgeAllUObjectsOnExit` → `~FEnumProperty`），一次是**加载大厅地图时**（`UNiagaraScript::Serialize` ← `LoadPackage` ← `UEngine::LoadMap`）。**两次的栈里都没有一帧 KillBugs**。改掉清场（186 次假死亡引发的 Niagara 爆发）之后又跑了一局完整流程（撤离 → 回大厅 → 关窗），**两次都没复现**——但样本太少，不能算修好。见「未决问题 13/14」 |
 
 **无头测不到 UI**：`-nullrhi` 下 `DrawHUD` 不执行。能无头证明的只有数据链路和
 `Lobby: click input bound`（绑定存在），画面对不对必须人看。
@@ -680,6 +680,17 @@ OSS: Session (KillBugsGame) already exists, can't join twice
     游戏过程完全正常，只在关窗时崩，所以不影响玩。
     **要定性的办法**：再复现一次（长会话 + 碰过撤离点 + 正常关窗）。如果复现，就把这一版改动
     stash 掉、重编、用同样流程跑一次——两次都崩就说明与这个功能无关。
+
+14. **加载大厅地图时的引擎崩溃（`UNiagaraScript::Serialize`），出现过一次，未解释。**
+    2026-10-05 那局：撤离成功 → 结算 → travel → **加载大厅约 2 秒后崩**，
+    栈全在引擎里（`UNiagaraScript::Serialize` ← `LoadPackage` ← `UEngine::LoadMap`），没有一帧 KillBugs。
+
+    时间上紧挨着当时"清场导致的 186 次爆浆"，所以把清场改成**冻结**之后又跑了一局同样的完整流程
+    （撤离 → 回大厅 → 关窗），干净通过。**仍然不能算修好**，只是那个可疑因素被消掉了。
+
+    这是第 13 条之外的第二起引擎侧崩溃，两起都是"UObject 元数据/序列化"的味道
+    （一个是析构、一个是反序列化）。如果再有第三起，就该怀疑是同一件事，
+    而不是两次巧合——那时值得用更重的手段（带符号/ASAN 的方式跑一次）。
 
 ---
 
