@@ -49,6 +49,14 @@ for path in WEAPONS:
         continue
 
     for field in SOUND_FIELDS:
+        # READ BEFORE WRITE, and this is now required rather than tidy.
+        #
+        # As of 2026-10-05 a None write is silently ignored unless the property has been read at
+        # least once first: this loop used to set and then read back, and the readback showed the
+        # old path while the set reported success. Tools/kb_probe_clear_soft_ptr.py found it by
+        # accident - it reads (`describe`) before every set, and clears fine.
+        readback(weapon, field)
+
         weapon.set_editor_property(field, None)
         # Load-bearing readback; see note 3 above.
         unreal.log("{}  {} -> {}".format(PREFIX, field, readback(weapon, field)))
