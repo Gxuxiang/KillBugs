@@ -933,6 +933,18 @@ OSS: Session (KillBugsGame) already exists, can't join twice
     （一个是析构、一个是反序列化）。如果再有第三起，就该怀疑是同一件事，
     而不是两次巧合——那时值得用更重的手段（带符号/ASAN 的方式跑一次）。
 
+    **第三起已经出现了（2026-10-05），而且把位置钉住了**：同样是**撤离成功 → travel 回大厅 →
+    开始加载地图包**时崩的，只是这次死在 `FLinkerLoad::SerializeExportMap` 而不是 Niagara。
+    三起全在引擎的序列化/包加载里，**没有一帧 KillBugs**。
+
+    > **那两次大厅崩溃的顺序很要紧，值得单独记**：日志里 `banked materials 89 -> 314`、
+    > `banked 492 -> 1818` 都在 `travelling back to the lobby` **之前**。也就是说**崩的是"回家"，
+    > 不是"记账"**——这一局赚的东西全都落盘了。这是"在结算时存、而不是在回大厅前存"直接换来的。
+
+    新线索：崩溃前一行是 `FlushAsyncLoading(277): 1 QueuedPackages`——**那一刻正好有一个包在排队**，
+    而引擎在默认级别不打印包名。要定性就得带 `LogStreaming Verbose` 再打一局，让下一次崩溃
+    直接说出是哪个包（日志会很大，几百 MB）。有名字才分得清是"某个资源"还是"某个子系统"。
+
 ---
 
 ## 下一步候选
