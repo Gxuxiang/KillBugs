@@ -237,6 +237,29 @@ void AKBGameMode::EndRun(EKBRunResult Result)
 	RunState->SetWavePhaseServer(EKBWavePhase::RunOver,
 		GetWorld()->GetTimeSeconds() + KBSettings().RunSummarySeconds);
 
+	// The run ends where the world stops, not where the summary starts.
+	//
+	// Nothing else stops it: the swarm keeps chewing and the player keeps walking, aiming and
+	// shooting all the way through the twelve seconds the summary is on screen. That is what a
+	// successful extraction looked like - a "撤离成功" panel over a fight still in progress.
+	//
+	// Culling is the wave-clear path the director already had, and the freeze is replicated
+	// because movement is client-predicted (see AKBCharacter::bRunOver). Both endings get it:
+	// the run is over, and it is over the same way whichever door it left by.
+	if (EnemyDirector)
+	{
+		EnemyDirector->CullAllRemaining();
+	}
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APawn* Pawn = It->Get() ? It->Get()->GetPawn() : nullptr;
+		if (AKBCharacter* Character = Cast<AKBCharacter>(Pawn))
+		{
+			Character->SetRunOverServer(true);
+		}
+	}
+
 	UE_LOG(LogKillBugs, Display, TEXT("Run over (%s) at wave %d - returning to the lobby in %.0fs"),
 		Result == EKBRunResult::Extracted ? TEXT("extracted") : TEXT("wiped out"),
 		RunState->GetWaveIndex() + 1, KBSettings().RunSummarySeconds);
@@ -534,6 +557,29 @@ void AKBGameMode::HandleExtractionStarted()
 	if (!HasAuthority() || !EnemyDirector)
 	{
 		return;
+	}
+
+	// Everybody who committed gets a full bar.
+	//
+	// The hold is thirty seconds under a swarm that only shows up because they did - and the walk
+	// there is what costs them. Measured in a real run: the team reached the zone with 18 of the
+	// 60 window seconds left and most of their health gone, then died holding at 79%. Charging the
+	// walk and the hold out of the same bar is two punishments for one decision. The extraction is
+	// where a run is supposed to become winnable, so it starts at full.
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* PlayerController = It->Get();
+		APawn* Pawn = PlayerController ? PlayerController->GetPawn() : nullptr;
+		UKBStatSheetComponent* Stats =
+			Pawn ? Pawn->FindComponentByClass<UKBStatSheetComponent>() : nullptr;
+
+		if (Stats)
+		{
+			// Heal(0) means "to full"; see UKBStatSheetComponent::Heal.
+			Stats->Heal(0.f);
+			UE_LOG(LogKillBugs, Display, TEXT("Extraction started: %s topped up to full"),
+				*GetNameSafe(Pawn));
+		}
 	}
 
 	if (KBSettings().ExtractionOpeningBurst > 0)

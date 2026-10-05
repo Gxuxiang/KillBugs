@@ -192,8 +192,8 @@ public:
 	// =====================================================================================
 
 	UPROPERTY(Config, EditAnywhere, Category = "撤离|区域",
-		meta = (ToolTip = "撤离圈的半径（厘米）。全员存活且都在这个圈里，撤离计时才开始走。\n\n和救助圈一样，代码判定和画面上的圈用的是同一个值。", ClampMin = "50.0", UIMax = "1500.0"))
-	float ExtractionRadius = 350.f;
+		meta = (ToolTip = "撤离圈的半径（厘米）。全员存活且都在这个圈里，撤离计时才开始走。\n\n和救助圈一样，代码判定和画面上的圈用的是同一个值。\n实测 350 太挤：四人加虫潮，一被推就把谁挤出圈，进度反复归零。现在 700（直径 14 米）。", ClampMin = "50.0", UIMax = "3000.0"))
+	float ExtractionRadius = 700.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "撤离|时序",
 		meta = (ToolTip = "【撤离计时】全员都在圈里时，要站多久才算撤离成功（秒）。\n\n这段时间里虫子会大规模涌来，所以它是一个守卫战的长度，不是走路的长度。", ClampMin = "1.0", UIMax = "180.0"))
@@ -216,8 +216,8 @@ public:
 	int32 ExtractionWaveInterval = 3;
 
 	UPROPERTY(Config, EditAnywhere, Category = "撤离|压力",
-		meta = (ToolTip = "【全员进圈读条】期间，刷怪速率取这个值（而不是 Explore 的涓涓细流）。\n\n只在读条时生效：跑过去的那段路、以及有人出圈暂停时，都回到 Explore 的平静。\n默认 12/秒 ≈ 现有的第 5 波强度。", ClampMin = "0.0", UIMax = "60.0"))
-	float ExtractionSpawnRate = 12.f;
+		meta = (ToolTip = "【全员进圈读条】期间，刷怪速率取这个值（而不是 Explore 的涓涓细流）。\n\n只在读条时生效：跑过去的那段路、以及有人出圈暂停时，都回到 Explore 的平静。\n\n【这个值要对着玩家的清怪速度定，不是对着波次强度】——步枪 0.55 秒一发，\n清怪上限约 1.8 只/秒；速率定成 12 时场上每秒净增约 10 只，30 秒的读条必然守不住，\n实测就是这么输的。现在 6/秒，净增约 4 只/秒，靠走位和地形才打得动。", ClampMin = "0.0", UIMax = "60.0"))
+	float ExtractionSpawnRate = 6.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "撤离|压力",
 		meta = (ToolTip = "读条期间场上虫子上限。\n\n【不能超过 虫群|MaxEnemies（默认 600）】—— 超了会被静默夹回来，因为增虫的地方会按那一个上限再夹一次。", ClampMin = "10", ClampMax = "2000", UIMax = "600"))

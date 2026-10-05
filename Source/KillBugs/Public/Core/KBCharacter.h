@@ -83,6 +83,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Aim")
 	FVector GetAimDirection() const;
 
+	/**
+	 * Server-only. Freezes this character for the rest of the run.
+	 *
+	 * Called by AKBGameMode::EndRun, which is why it is public: the run ending is the GameMode's
+	 * to announce, and every other player-related end-of-run behaviour is reached from there too.
+	 */
+	void SetRunOverServer(bool bInRunOver);
+
 protected:
 	void Move(const FInputActionValue& Value);
 
@@ -121,6 +129,23 @@ protected:
 
 	/** Reverses ApplyDownedState. */
 	void ApplyRevivedState();
+
+	/**
+	 * The run has ended - a wipe, or a successful extraction - so this player is done playing.
+	 *
+	 * Replicated for exactly the reason bDowned is (see the note there): movement is client
+	 * predicted, so freezing only the server leaves the owning client walking its pawn around
+	 * underneath the summary. Without this, an extraction that succeeded still had the player
+	 * running and shooting through the twelve seconds before the lobby.
+	 */
+	UFUNCTION()
+	void OnRep_bRunOver();
+
+	UPROPERTY(ReplicatedUsing = OnRep_bRunOver, BlueprintReadOnly, Category = "KillBugs|Run")
+	bool bRunOver = false;
+
+	/** The same freeze as going down, minus the rescue ring - nobody left to rescue. */
+	void ApplyRunOverState();
 
 	/**
 	 * The rescue zone this character projects while downed.

@@ -3,6 +3,7 @@
 #include "Combat/KBProjectileDirector.h"
 #include "Combat/KBStatSheetComponent.h"
 #include "Core/KBCharacter.h"
+#include "Core/KBGameState.h"
 #include "Core/KBPlayerState.h"
 #include "Data/KBWeaponDefinition.h"
 #include "DrawDebugHelpers.h"
@@ -112,7 +113,29 @@ void UKBWeaponInventoryComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	}
 
 	TickWeaponCooldowns(DeltaTime);
-	TickAutoWeapons();
+
+	// Nobody shoots from the floor, and nobody shoots once the run is over.
+	//
+	// The weapon has a tick of its own and nothing else switches it off, so it has to ask whether
+	// its owner is still a participant. Two real symptoms came from not asking: a downed player's
+	// auto weapon kept firing from the body on the ground, and a run that had already been WON
+	// kept shooting through its own summary screen.
+	//
+	// Fail closed: a missing player state means "do not fire", not "fire anyway".
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	const AKBPlayerState* KBPlayerState =
+		OwnerPawn ? OwnerPawn->GetPlayerState<AKBPlayerState>() : nullptr;
+	const AKBGameState* RunState = GetWorld() ? GetWorld()->GetGameState<AKBGameState>() : nullptr;
+
+	const bool bOwnerOutOfTheFight = !KBPlayerState
+		|| KBPlayerState->IsDowned()
+		|| !RunState
+		|| RunState->GetWavePhase() == EKBWavePhase::RunOver;
+
+	if (!bOwnerOutOfTheFight)
+	{
+		TickAutoWeapons();
+	}
 }
 
 void UKBWeaponInventoryComponent::TickWeaponCooldowns(float DeltaTime)

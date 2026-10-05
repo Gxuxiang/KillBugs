@@ -229,6 +229,45 @@ void AKBCharacter::ApplyRevivedState()
 	}
 }
 
+void AKBCharacter::ApplyRunOverState()
+{
+	// The same freeze as going down, by the same means and for the same reason: movement is
+	// client-predicted, so this has to be applied on both sides or the owning client keeps walking.
+	//
+	// What it does NOT do is open a rescue ring. The run is over; there is nobody left to be
+	// rescued from, and a ring on every body during the summary would be a lie.
+	bFireHeld = false;
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+	}
+
+	SetActorTickEnabled(false);
+}
+
+void AKBCharacter::OnRep_bRunOver()
+{
+	if (bRunOver)
+	{
+		ApplyRunOverState();
+	}
+}
+
+void AKBCharacter::SetRunOverServer(bool bInRunOver)
+{
+	if (!HasAuthority() || bRunOver == bInRunOver)
+	{
+		return;
+	}
+
+	bRunOver = bInRunOver;
+
+	// Applied here as well as in the OnRep, because the authority never receives its own rep.
+	ApplyRunOverState();
+}
+
 void AKBCharacter::HandleRescued()
 {
 	// The channel only ever completes on the server, so this is server-side by construction -
@@ -366,6 +405,7 @@ void AKBCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
 	DOREPLIFETIME(AKBCharacter, AimYaw);
 	DOREPLIFETIME(AKBCharacter, bDowned);
+	DOREPLIFETIME(AKBCharacter, bRunOver);
 }
 
 void AKBCharacter::SendAimToServer(float NewYaw)
