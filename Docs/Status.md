@@ -110,7 +110,8 @@ pawn 真的两手空空。
 | 存盘往返 | `KB.Profile.Reload` 后 `List` 一模一样（含配装标志） |
 | **配装进局** | 只带霰弹枪 → `Loadout: 1 weapon(s) carried in (3 owned)`，`KB.Player.Stats` 里**只有**霰弹枪 |
 | **团灭抹掉带进去的** | `wipe took 1 carried weapon(s), stash 3 -> 2` |
-| **撤离带走局内捡的** | 逻辑同源（`ApplyExtractedWeapons`）——**只验了代码路径，没有实机跑过卡牌捡枪再撤离这一串** |
+| **撤离带走局内捡的** | ✅ 实机（一局里用卡拿到冲击波、撤离成功 → `brought a new weapon home: ...Shockwave`，`extraction kept 2 carried weapon(s), stash now 3`） |
+| 商店面板本体 | ⚠️ **没人看过**（`-nullrhi` 不跑 `DrawHUD`）。规则全部实测，但排版/手感要人看 |
 | **不保底** | 仓库打空后再进局 = `Loadout: 0 weapon(s)`，**没有偷偷补** |
 
 ### 已知取舍
