@@ -80,6 +80,9 @@ private:
 	/** Resolves a drop mesh from settings, falling back to a visible placeholder. */
 	UStaticMesh* ResolveMesh(EKBItemType Type);
 
+	/** Gives the instances a material that can take this type's colour, and applies it. */
+	void ApplyMaterial(UInstancedStaticMeshComponent* Instances, EKBItemType Type);
+
 	UInstancedStaticMeshComponent* GetInstances(EKBItemType Type);
 
 	/** One per item type, created on first use. */
@@ -93,6 +96,9 @@ private:
 
 	/** Set once the placeholder warning has been said, so it does not fill the log. */
 	bool bWarnedAboutPlaceholderMesh = false;
+
+	/** Same, for "the drop material takes no colour" - which would make the two types identical. */
+	bool bWarnedAboutMissingTintParameter = false;
 
 	/** Set once the drop cap has been hit, so the warning is said once per run, not per death. */
 	bool bWarnedAboutDropCap = false;

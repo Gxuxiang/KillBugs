@@ -18,6 +18,12 @@ namespace
 	/** The engine's own cube. A drop nobody can see is the bug this fallback exists to avoid. */
 	const TCHAR* const PlaceholderMeshPath = TEXT("/Engine/BasicShapes/Cube.Cube");
 
+	/**
+	 * The engine's own surface material, and the reason it is named here: it exposes a `Color`
+	 * parameter, which the placeholder cube's own material does not.
+	 */
+	const TCHAR* const PlaceholderMaterialPath = TEXT("/Engine/BasicShapes/BasicShapeMaterial");
+
 	/** Far below the arena, at zero scale. The visual pass starts from a field of these. */
 	FTransform HiddenDropTransform()
 	{
@@ -265,6 +271,57 @@ UStaticMesh* AKBLootDirector::ResolveMesh(EKBItemType Type)
 	return LoadObject<UStaticMesh>(nullptr, PlaceholderMeshPath);
 }
 
+void AKBLootDirector::ApplyMaterial(UInstancedStaticMeshComponent* Instances, EKBItemType Type)
+{
+	if (!Instances)
+	{
+		return;
+	}
+
+	// In order of preference: the material the settings name, then whatever the mesh brought,
+	// then the engine's placeholder material. The last step is not decoration - it is the only
+	// one that is known to work, and the first attempt at this shipped without it.
+	//
+	// What happened: Tools/kb_probe_loot_tint.py reported that /Engine/BasicShapes/BasicShapeMaterial
+	// exposes a `Color` parameter, which is true. But the engine's CUBE does not carry that
+	// material - it carries WorldGridMaterial, which exposes nothing. So the tint was a silent
+	// no-op and both drop types looked identical, which the log did say only because the
+	// parameter was checked instead of assumed.
+	UMaterialInterface* Material = KBSettings().DropMaterial.LoadSynchronous();
+	if (!Material)
+	{
+		Material = Instances->GetMaterial(0);
+	}
+
+	FLinearColor Existing;
+	const bool bTintable = Material
+		&& Material->GetVectorParameterValue(FHashedMaterialParameterInfo(TEXT("Color")), Existing);
+
+	if (!bTintable)
+	{
+		if (!bWarnedAboutMissingTintParameter)
+		{
+			bWarnedAboutMissingTintParameter = true;
+			UE_LOG(LogKillBugs, Warning,
+				TEXT("KB Loot: '%s' takes no 'Color' parameter - falling back to the engine "
+				     "placeholder material so the two drop types can still be told apart."),
+				*GetNameSafe(Material));
+		}
+
+		Material = LoadObject<UMaterialInterface>(nullptr, PlaceholderMaterialPath);
+		if (!Material)
+		{
+			return;
+		}
+	}
+
+	UMaterialInstanceDynamic* Dynamic = UMaterialInstanceDynamic::Create(Material, Instances);
+	Dynamic->SetVectorParameterValue(TEXT("Color"),
+		Type == EKBItemType::Medkit ? KBSettings().MedkitDropTint : KBSettings().MaterialDropTint);
+
+	Instances->SetMaterial(0, Dynamic);
+}
+
 UInstancedStaticMeshComponent* AKBLootDirector::GetInstances(EKBItemType Type)
 {
 	TObjectPtr<UInstancedStaticMeshComponent>& Slot =
@@ -293,6 +350,14 @@ UInstancedStaticMeshComponent* AKBLootDirector::GetInstances(EKBItemType Type)
 	// interactable. Asking the physics scene about it would be work for no answer.
 	Instances->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Instances->SetGenerateOverlapEvents(false);
+
+	// Slime decals are DEFERRED decals: they paint every surface inside their projection box, not
+	// just the floor they were aimed at. A puddle next to a drop therefore lays a flat green splat
+	// across the drop - the same thing that already had to be switched off for the player and the
+	// swarm. Loot that looks like a stain is loot nobody walks to.
+	Instances->SetReceivesDecals(false);
+
+	ApplyMaterial(Instances, Type);
 
 	Instances->RegisterComponent();
 	Slot = Instances;

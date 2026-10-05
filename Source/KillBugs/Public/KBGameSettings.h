@@ -236,8 +236,8 @@ public:
 	// =====================================================================================
 
 	UPROPERTY(Config, EditAnywhere, Category = "搜刮|拾取",
-		meta = (ToolTip = "走到地上掉落物多近才算捡到（厘米）。\n\n这是基础值，实际半径还要乘玩家自己的拾取倍率——卡牌「远见」加的就是那个倍率。\n拾取是【走过去自动发生】的，没有按键。", ClampMin = "0.0", UIMax = "3000.0"))
-	float BasePickupRadius = 300.f;
+		meta = (ToolTip = "走到离掉落物多近才算捡到（厘米）。\n\n这是【从玩家中心到掉落物中心】的距离，不是净空——玩家胶囊半径约 34，掉落物约 30，\n所以 100 大约是“踩上去”，而 300 是“从旁边路过就吸走”。\n实际半径还要乘玩家自己的拾取倍率（卡牌「远见」加的就是那个倍率）。\n拾取是【走过去自动发生】的，没有按键。", ClampMin = "0.0", UIMax = "3000.0"))
+	float BasePickupRadius = 90.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "搜刮|拾取",
 		meta = (ToolTip = "药包回多少血。\n\n回血上限是玩家的最大血量，超出的部分不会浪费在溢出上（Heal 会自己钳）。\n\n注意：【满血时踩到药包不会捡】，它会留在地上——所以这个值调大不会变成“走路时把包全吃光”。", ClampMin = "1.0", UIMax = "500.0"))
@@ -262,6 +262,27 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
 		meta = (ToolTip = "药包在地面上长什么样。留空的处理同上。"))
 	TSoftObjectPtr<UStaticMesh> MedkitDropMesh;
+
+	/**
+	 * The two colours, applied as a dynamic material instance on the drop mesh.
+	 *
+	 * The engine's placeholder cube uses BasicShapeMaterial, which exposes a `Color` parameter,
+	 * so this works with no art at all. A real drop mesh will need a material with the same
+	 * parameter name - if it does not have one, the tint is silently skipped and both drop types
+	 * look identical, which is why the code checks for the parameter and says so in the log
+	 * rather than assuming.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "掉落物的材质。\n\n【留空时有回退链】：先用网格自带的材质；如果那个材质没有名为 Color 的向量参数\n（引擎那个方块自带的 WorldGridMaterial 就没有），就回退到引擎的 BasicShapeMaterial 并打一条日志。\n\n真美术资源来了之后，要么把材质留空、让它的材质带一个 Color 参数，要么在这里直接指定。"))
+	TSoftObjectPtr<UMaterialInterface> DropMaterial;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "材料的颜色（琥珀色：看着像“资源”）。"))
+	FLinearColor MaterialDropTint = FLinearColor(0.86f, 0.62f, 0.20f, 1.f);
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "药包的颜色（绿色：一眼认出是“回血”）。"))
+	FLinearColor MedkitDropTint = FLinearColor(0.28f, 0.82f, 0.44f, 1.f);
 
 	// =====================================================================================
 	// 受伤反馈
