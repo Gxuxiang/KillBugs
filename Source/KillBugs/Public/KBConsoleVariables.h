@@ -46,3 +46,14 @@ extern KILLBUGS_API TAutoConsoleVariable<float> CVarKBSwarmAudioLog;
  * player damage already goes through - contact bites, and whatever lands later.
  */
 extern KILLBUGS_API TAutoConsoleVariable<int32> CVarKBPlayerGod;
+
+/**
+ * Testing switch: every bug death drops a material.
+ *
+ * Usage: KB.Loot.ForceDrop 1
+ *
+ * The per-archetype chance is a design value and stays low, which makes "did the drop path run
+ * at all" a coin flip during a headless test. This makes it deterministic without touching the
+ * content. Off by default.
+ */
+extern KILLBUGS_API TAutoConsoleVariable<int32> CVarKBLootForceDrop;

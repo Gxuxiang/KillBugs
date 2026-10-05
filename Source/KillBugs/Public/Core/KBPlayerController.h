@@ -60,6 +60,16 @@ public:
 	UFUNCTION()
 	void HandleWavePhaseChanged(EKBWavePhase NewPhase);
 
+	/**
+	 * The run's verdict: bank the materials, or say out loud that they are being lost.
+	 *
+	 * Gold is deliberately NOT handled here - it banks on either ending, in
+	 * HandleWavePhaseChanged. Materials are the first thing in the game whose fate depends on
+	 * which way the run ended, and that is the whole point of searching.
+	 */
+	UFUNCTION()
+	void HandleRunResultChanged(EKBRunResult NewResult);
+
 protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;

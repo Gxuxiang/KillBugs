@@ -21,3 +21,10 @@ TAutoConsoleVariable<int32> CVarKBPlayerGod(
 	TEXT("1 = the player takes no damage (default 0). Testing switch: KB.Player.God 1 to walk "
 	     "through a wave, 0 to fight it."),
 	ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarKBLootForceDrop(
+	TEXT("KB.Loot.ForceDrop"),
+	0,
+	TEXT("1 = every bug death drops a material, whatever the archetype's chance says (default 0). "
+	     "Testing switch, so a headless run can prove the drop path ran without rolling dice."),
+	ECVF_Default);

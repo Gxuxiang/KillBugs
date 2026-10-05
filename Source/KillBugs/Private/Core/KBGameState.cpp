@@ -45,6 +45,11 @@ void AKBGameState::SetRunResultServer(EKBRunResult Result)
 	}
 
 	RunResult = Result;
+
+	// Broadcast here as well as in the OnRep, for the same reason SetWavePhaseServer does: on a
+	// listen server the authority never receives its own rep, and the host is a player whose
+	// materials have to be banked like anybody else's.
+	OnRunResultChanged.Broadcast(RunResult);
 }
 
 float FKBPhaseTimings::GetPhaseDuration(EKBWavePhase Phase) const
@@ -72,6 +77,11 @@ void AKBGameState::SetPhaseTimingsServer(const FKBPhaseTimings& InTimings)
 void AKBGameState::OnRep_WavePhase()
 {
 	OnWavePhaseChanged.Broadcast(WavePhase);
+}
+
+void AKBGameState::OnRep_RunResult()
+{
+	OnRunResultChanged.Broadcast(RunResult);
 }
 
 void AKBGameState::SetWavePhaseServer(EKBWavePhase NewPhase, float InPhaseEndServerTime)

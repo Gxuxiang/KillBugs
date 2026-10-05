@@ -56,6 +56,18 @@ enum class EKBRunResult : uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FKBOnWavePhaseChanged, EKBWavePhase, NewPhase);
 
 /**
+ * Fired when the run's verdict is decided - on the host by SetRunResultServer, on a client by
+ * the OnRep.
+ *
+ * Exists because the verdict now decides something that cannot be undone: materials are banked
+ * on an extraction and thrown away on a wipe. Reading GetRunResult() from inside the phase
+ * handler instead would work on the host, where EndRun sets the result and the phase in order,
+ * but on a client it would rely on two replicated properties landing in the same bunch and being
+ * applied in that order - true today, a coincidence, and silent when it stops being true.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FKBOnRunResultChanged, EKBRunResult, NewResult);
+
+/**
  * How long each phase of a wave cycle lasts.
  *
  * Mirrored onto the GameState because the GameMode does not replicate - a client drawing a
@@ -133,6 +145,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "KillBugs|Run")
 	FKBOnWavePhaseChanged OnWavePhaseChanged;
 
+	/** Fired once, when the run is decided. See the declaration for why it is not just a read. */
+	UPROPERTY(BlueprintAssignable, Category = "KillBugs|Run")
+	FKBOnRunResultChanged OnRunResultChanged;
+
 	/** How the run ended, or InProgress while it has not. */
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Run")
 	EKBRunResult GetRunResult() const { return RunResult; }
@@ -176,6 +192,9 @@ protected:
 	UFUNCTION()
 	void OnRep_WavePhase();
 
+	UFUNCTION()
+	void OnRep_RunResult();
+
 	UPROPERTY(ReplicatedUsing = OnRep_WavePhase, BlueprintReadOnly, Category = "KillBugs|Run")
 	EKBWavePhase WavePhase = EKBWavePhase::Warmup;
 
@@ -191,7 +210,7 @@ protected:
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")
 	FKBPhaseTimings Timings;
 
-	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")
+	UPROPERTY(ReplicatedUsing = OnRep_RunResult, BlueprintReadOnly, Category = "KillBugs|Run")
 	EKBRunResult RunResult = EKBRunResult::InProgress;
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")

@@ -7,6 +7,7 @@
 
 class AKBEnemyDirector;
 class AKBExtractionZone;
+class AKBLootDirector;
 
 /**
  * Server-only authority for the run: wave scheduling, card rolling, rewards, respawn and
@@ -72,6 +73,7 @@ public:
 	static void ConsoleExtractFail(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleExtractSchedule(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleExtractSelfTest(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleRunWipe(const TArray<FString>& Args, UWorld* World);
 
 protected:
 	/** Monotonic counter feeding AKBPlayerState::KBPlayerIndex. */
@@ -86,11 +88,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Extraction")
 	TSubclassOf<AKBExtractionZone> ExtractionZoneClass;
 
+	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Loot")
+	TSubclassOf<AKBLootDirector> LootDirectorClass;
+
 	UPROPERTY(BlueprintReadOnly, Category = "KillBugs|Swarm")
 	TObjectPtr<AKBEnemyDirector> EnemyDirector;
 
 	UPROPERTY(BlueprintReadOnly, Category = "KillBugs|Extraction")
 	TObjectPtr<AKBExtractionZone> ExtractionZone;
+
+	UPROPERTY(BlueprintReadOnly, Category = "KillBugs|Loot")
+	TObjectPtr<AKBLootDirector> LootDirector;
 
 	// ---- Tuning --------------------------------------------------------------------------
 	//

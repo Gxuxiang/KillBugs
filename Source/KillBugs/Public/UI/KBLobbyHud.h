@@ -51,6 +51,7 @@ class KILLBUGS_API AKBLobbyHud : public AHUD
 public:
 	AKBLobbyHud();
 
+	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
 
 	/** EKBLobbyButton value, or INDEX_NONE. Empty until the first DrawHUD. */
@@ -64,6 +65,9 @@ private:
 	UKBSessionSubsystem* GetSessions() const;
 
 	void DrawTitle(const FBox2D& Panel);
+
+	/** This machine's banked totals, in the title bar. */
+	void DrawStash(const FBox2D& Panel, float RuleY);
 	void DrawServerList(const FBox2D& Panel);
 	void DrawPlayerList(const FBox2D& Panel);
 	void DrawButtons(const FBox2D& Panel);

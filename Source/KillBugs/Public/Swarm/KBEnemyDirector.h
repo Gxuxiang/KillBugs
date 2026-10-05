@@ -10,6 +10,7 @@ class UKBEnemyVisualizerComponent;
 class UKBGoreComponent;
 class UKBSwarmAudioComponent;
 class AKBPlayerState;
+class AKBLootDirector;
 
 /**
  * The entire bug swarm, in one Actor.
@@ -145,6 +146,17 @@ public:
 	 */
 	UKBEnemyVisualizerComponent* GetVisualizer() const { return Visualizer; }
 
+	/**
+	 * Where deaths are turned into loot. Set once by AKBGameMode::BeginPlay.
+	 *
+	 * A weak pointer and an injected dependency rather than a lookup, because the lookup would
+	 * have to happen on every death and the answer never changes.
+	 *
+	 * Defined in the .cpp: assigning to a TWeakObjectPtr needs the complete type, and this
+	 * header only forward-declares it.
+	 */
+	void SetLootDirector(AKBLootDirector* InLootDirector);
+
 	// ---- Console commands (public so the delegates can bind) -----------------------------
 
 	// FConsoleCommandWithWorldAndArgsDelegate takes only (Args, World) - there is no
@@ -242,6 +254,9 @@ private:
 
 	/** Set when the run ends. See SetSimulationFrozen. */
 	bool bSimulationFrozen = false;
+
+	/** Weak: the loot director belongs to the world, not to this actor. See SetLootDirector. */
+	TWeakObjectPtr<AKBLootDirector> LootDirector;
 
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Combat")
 	float EnemySpeedScale = 1.f;

@@ -232,6 +232,38 @@ public:
 	float ExtractionEdgeMargin = 600.f;
 
 	// =====================================================================================
+	// 搜刮
+	// =====================================================================================
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|拾取",
+		meta = (ToolTip = "走到地上掉落物多近才算捡到（厘米）。\n\n这是基础值，实际半径还要乘玩家自己的拾取倍率——卡牌「远见」加的就是那个倍率。\n拾取是【走过去自动发生】的，没有按键。", ClampMin = "0.0", UIMax = "3000.0"))
+	float BasePickupRadius = 300.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|拾取",
+		meta = (ToolTip = "药包回多少血。\n\n回血上限是玩家的最大血量，超出的部分不会浪费在溢出上（Heal 会自己钳）。\n\n注意：【满血时踩到药包不会捡】，它会留在地上——所以这个值调大不会变成“走路时把包全吃光”。", ClampMin = "1.0", UIMax = "500.0"))
+	float MedkitHealAmount = 40.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "场上同时最多存在多少个掉落物。到顶之后不再掉新的。\n\n【不做“回收最旧的”】：在玩家眼皮底下、还够得着的地方把战利品删掉，比不掉新的更糟。", ClampMin = "8", UIMax = "1024"))
+	int32 MaxDrops = 128;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "掉落物离地面多高（厘米）。\n\n抬起来一点，免得和地面共面、从俯视角度看不出来。", ClampMin = "0.0", UIMax = "300.0"))
+	float DropHeightOffset = 35.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "掉落物的显示缩放。\n\n先用引擎基础体当占位，真正的美术资源还没做。", ClampMin = "0.05", UIMax = "10.0"))
+	float DropScale = 0.6f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "材料在地面上长什么样。\n\n【留空会回落到引擎自带的方块】并打一条警告——功能是好的但看不见才是最难查的那种 bug。"))
+	TSoftObjectPtr<UStaticMesh> MaterialDropMesh;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
+		meta = (ToolTip = "药包在地面上长什么样。留空的处理同上。"))
+	TSoftObjectPtr<UStaticMesh> MedkitDropMesh;
+
+	// =====================================================================================
 	// 受伤反馈
 	// =====================================================================================
 
@@ -295,11 +327,6 @@ public:
 		meta = (ToolTip = "玩家基础移动速度。卡片可以按倍率放大。",
 			ClampMin = "100.0", UIMax = "3000.0"))
 	float BaseMoveSpeed = 700.f;
-
-	UPROPERTY(Config, EditAnywhere, Category = "玩家",
-		meta = (ToolTip = "经验/掉落物的拾取半径。目前拾取系统还没接，这个值先留着。",
-			ClampMin = "0.0", UIMax = "3000.0"))
-	float BasePickupRadius = 300.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "玩家",
 		meta = (ToolTip = "联机大厅的房间容量。同时是会话的 NumPublicConnections 和大厅界面上显示的 x/N。\n\n设计上是 4 人各自一个客户端（见 DefaultEngine.ini 的 bUseSplitscreen 说明），所以这个值不是分屏人数。",

@@ -173,7 +173,7 @@ make_card(
 make_card(
     "DA_Card_LongSight",
     title=unreal.Text("远见"),
-    description=unreal.Text("经验拾取范围大幅扩大，经验获取提高 15%。"),
+    description=unreal.Text("拾取范围大幅扩大（掉落物与经验通用），经验获取提高 15%。"),
     rarity=RARITY_RARE, weight=0.7,
     effect=EFFECT_STAT, repeat_rule=REPEAT_STACKABLE,
     stat_mods=mods(pickup_radius_mult=1.5, xp_gain_mult=1.15),

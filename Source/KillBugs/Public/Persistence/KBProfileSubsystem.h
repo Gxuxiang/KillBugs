@@ -38,6 +38,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Profile")
 	int32 GetBankedGold() const { return BankedGold; }
 
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Profile")
+	int32 GetBankedMaterials() const { return BankedMaterials; }
+
 	/** Called when this machine enters a fresh arena, so the once-per-run fold can happen again. */
 	void BeginRun();
 
@@ -49,6 +52,18 @@ public:
 	 * rather than correct anything. BeginRun clears the latch for the next one.
 	 */
 	void BankRunGold(int32 RunGold);
+
+	/**
+	 * Folds the materials carried out of a successful extraction into the stash.
+	 *
+	 * Separate from BankRunGold, and with its OWN latch, for two reasons. The two are banked at
+	 * different moments - gold on any ending, materials only on an extraction - so they cannot
+	 * share a "this run is done" flag. And sharing one would fail silently in the worst way: the
+	 * gold call sets the flag first, and the materials bank would then be skipped without a word.
+	 *
+	 * A wipe does not reach this at all; the caller reports the loss instead.
+	 */
+	void BankRunMaterials(int32 RunMaterials);
 
 	/** Deletes the save and starts from zero. Bound to `KB.Profile.Reset`. */
 	void ResetProfile();
@@ -63,6 +78,9 @@ public:
 	 */
 	static int32 MaxBankedGold() { return TNumericLimits<int32>::Max() / 2; }
 
+	/** The same ceiling, for the same reason. */
+	static int32 MaxBankedMaterials() { return TNumericLimits<int32>::Max() / 2; }
+
 private:
 	/** Reads the profile off disk, or starts at zero. Never fails - a bad profile is a fresh one. */
 	void LoadProfile();
@@ -73,6 +91,14 @@ private:
 	/** The persisted total. */
 	int32 BankedGold = 0;
 
+	/** Materials brought home by successful extractions. */
+	int32 BankedMaterials = 0;
+
 	/** Whether this run's earnings have already been banked. Cleared by BeginRun. */
 	bool bBankedThisRun = false;
+
+	/**
+	 * Its own latch, not shared with the gold one - see BankRunMaterials. Cleared by BeginRun.
+	 */
+	bool bMaterialsBankedThisRun = false;
 };

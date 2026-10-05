@@ -162,6 +162,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rewards")
 	int32 GoldValue = 0;
 
+	// ---- Loot ---------------------------------------------------------------------------
+
+	/**
+	 * Chance that killing this bug leaves a material on the ground.
+	 *
+	 * The defaults are deliberately NON-ZERO and the assets were authored before these fields
+	 * existed. A DataAsset serializes by tag, so a field missing from an existing .uasset reads
+	 * back as this C++ default - which means loot works the moment this ships, without anyone
+	 * having to re-run Tools/kb_setup_enemies.py first. Re-running it is still how the numbers
+	 * get to be intentional rather than merely non-zero.
+	 *
+	 * Rolled regardless of who - if anyone - gets credit for the kill. A drop is a property of
+	 * the bug dying, not of the reward for killing it.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Loot", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MaterialDropChance = 0.15f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Loot", meta = (ClampMin = "0"))
+	int32 MaterialDropMin = 1;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Loot", meta = (ClampMin = "0"))
+	int32 MaterialDropMax = 1;
+
+	/** Rarer than materials: a medkit is a moment of relief, not the thing you came for. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Loot", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MedkitDropChance = 0.03f;
+
 	// ---- VFX ----------------------------------------------------------------------------
 
 	/**

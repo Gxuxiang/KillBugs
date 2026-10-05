@@ -1,5 +1,6 @@
 #include "Core/KBPlayerState.h"
 
+#include "Combat/KBStatSheetComponent.h"
 #include "Combat/KBWeaponInventoryComponent.h"
 #include "Data/KBCardDefinition.h"
 #include "Data/KBWeaponDefinition.h"
@@ -19,6 +20,7 @@ void AKBPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 
 	DOREPLIFETIME(AKBPlayerState, KBPlayerIndex);
 	DOREPLIFETIME(AKBPlayerState, Gold);
+	DOREPLIFETIME(AKBPlayerState, Materials);
 	DOREPLIFETIME(AKBPlayerState, XP);
 	DOREPLIFETIME(AKBPlayerState, PlayerLevel);
 	DOREPLIFETIME(AKBPlayerState, bIsDowned);
@@ -46,6 +48,17 @@ void AKBPlayerState::AddGold(int32 Amount)
 	}
 
 	Gold = FMath::Max(0, Gold + Amount);
+	OnRunStateChanged.Broadcast();
+}
+
+void AKBPlayerState::AddMaterials(int32 Amount)
+{
+	if (!HasAuthority() || Amount == 0)
+	{
+		return;
+	}
+
+	Materials = FMath::Max(0, Materials + Amount);
 	OnRunStateChanged.Broadcast();
 }
 
@@ -163,6 +176,50 @@ UKBWeaponInventoryComponent* AKBPlayerState::GetWeaponInventory() const
 }
 
 // ---------------------------------------------------------------------------------------
+// Debug: KB.Player.Damage
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Hurts the local player by a fixed amount, so a test can put them below full health.
+ *
+ * Exists for the medkit: a pickup that only fires when the player is hurt cannot be tested by
+ * a command that arrives at full health. Goes through the stat sheet so it is the same funnel
+ * every other source of damage uses - including the god-mode switch, which will correctly
+ * refuse it.
+ */
+static void KBConsolePlayerDamage(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || Args.Num() < 1)
+	{
+		UE_LOG(LogKillBugs, Warning, TEXT("Player.Damage: expected <amount>"));
+		return;
+	}
+
+	APlayerController* PlayerController = World->GetFirstPlayerController();
+	APawn* Pawn = PlayerController ? PlayerController->GetPawn() : nullptr;
+	UKBStatSheetComponent* Stats = Pawn ? Pawn->FindComponentByClass<UKBStatSheetComponent>() : nullptr;
+
+	if (!Stats)
+	{
+		UE_LOG(LogKillBugs, Warning, TEXT("Player.Damage: no local stat sheet"));
+		return;
+	}
+
+	const float Amount = FCString::Atof(*Args[0]);
+	const float Before = Stats->GetHealth();
+	Stats->ApplyDamage(Amount);
+
+	UE_LOG(LogKillBugs, Display, TEXT("KB Loot: damaged the player for %.0f (health %.0f -> %.0f)"),
+		Amount, Before, Stats->GetHealth());
+}
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsolePlayerDamageCommand(
+	TEXT("KB.Player.Damage"),
+	TEXT("KB.Player.Damage <n> - hurt the local player, for testing anything that only happens "
+	     "below full health. KB.Player.God 0 first, or it does nothing."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&KBConsolePlayerDamage));
+
+// ---------------------------------------------------------------------------------------
 // Debug: KB.Player.Stats
 // ---------------------------------------------------------------------------------------
 
@@ -185,9 +242,9 @@ static void KBConsolePlayerStats(const TArray<FString>& Args, UWorld* World)
 
 		++Reported;
 		UE_LOG(LogKillBugs, Display,
-			TEXT("Player %d: level %d | xp %d | gold %d | downed %s"),
+			TEXT("Player %d: level %d | xp %d | gold %d | materials %d | downed %s"),
 			PlayerState->GetKBPlayerIndex(), PlayerState->GetKBLevel(),
-			PlayerState->GetXP(), PlayerState->GetGold(),
+			PlayerState->GetXP(), PlayerState->GetGold(), PlayerState->GetMaterials(),
 			PlayerState->IsDowned() ? TEXT("yes") : TEXT("no"));
 
 		if (const APawn* Pawn = PlayerController->GetPawn())

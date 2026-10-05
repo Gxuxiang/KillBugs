@@ -742,14 +742,44 @@ void AKBHud::DrawRunSummary()
 	DrawText(Countdown, FLinearColor(0.60f, 0.65f, 0.74f, 1.f),
 		CentreX - CountdownWidth * 0.5f, CentreY + 120.f, Font, 1.0f, false);
 
-	// Where the looted inventory will be listed once 搜 exists. Named here rather than left
-	// blank so the empty state is obviously a missing feature and not a rendering bug.
-	const FString Pending = TEXT("（搜刮到的物品将在后续版本列在这里）");
-	float PendingWidth = 0.f;
-	float PendingHeight = 0.f;
-	GetTextSize(Pending, PendingWidth, PendingHeight, Font, 0.9f);
-	DrawText(Pending, FLinearColor(0.30f, 0.33f, 0.40f, 1.f),
-		CentreX - PendingWidth * 0.5f, CentreY + 160.f, Font, 0.9f, false);
+	// What the loot rule actually did to the player. This is the only place the two endings
+	// differ in a way that costs something, so it is the one line on this screen that is not
+	// just a number - it is the answer to "was the walk out worth it".
+	const APlayerController* LocalController = GetOwningPlayerController();
+	const AKBPlayerState* LocalPlayerState =
+		LocalController ? LocalController->GetPlayerState<AKBPlayerState>() : nullptr;
+
+	if (LocalPlayerState)
+	{
+		const int32 Carried = LocalPlayerState->GetMaterials();
+
+		FString LootLine;
+		FLinearColor LootColour;
+
+		if (Result == EKBRunResult::Extracted)
+		{
+			LootLine = FString::Printf(TEXT("带出材料 %d"), Carried);
+			LootColour = FLinearColor(0.36f, 0.74f, 0.46f, 1.f);
+		}
+		else if (Result == EKBRunResult::WipedOut)
+		{
+			LootLine = Carried > 0
+				? FString::Printf(TEXT("损失材料 %d"), Carried)
+				: TEXT("什么也没带出来");
+			LootColour = Carried > 0
+				? FLinearColor(0.90f, 0.36f, 0.32f, 1.f)
+				: FLinearColor(0.45f, 0.48f, 0.55f, 1.f);
+		}
+
+		if (!LootLine.IsEmpty())
+		{
+			float LootWidth = 0.f;
+			float LootHeight = 0.f;
+			GetTextSize(LootLine, LootWidth, LootHeight, Font, 1.1f);
+			DrawText(LootLine, LootColour, CentreX - LootWidth * 0.5f, CentreY + 150.f,
+				Font, 1.1f, false);
+		}
+	}
 }
 
 void AKBHud::DrawEnemyHealthBars()
@@ -955,6 +985,13 @@ void AKBHud::DrawRunReadout()
 
 	DrawText(FString::Printf(TEXT("经验 %d      金币 %d"), PlayerState->GetXP(), PlayerState->GetGold()),
 		Dim, ReadoutMargin, Y, SmallFont, 1.0f, false);
+	Y += 26.f;
+
+	// Carried materials, shown at zero as well. The number is what tells the player that the
+	// things on the ground are worth walking to, and a readout that only appears once you have
+	// some teaches nothing to the player who has none.
+	DrawText(FString::Printf(TEXT("材料 %d"), PlayerState->GetMaterials()),
+		PlayerState->GetMaterials() > 0 ? Ink : Dim, ReadoutMargin, Y, SmallFont, 1.0f, false);
 	Y += 34.f;
 
 	const APawn* Pawn = PlayerController->GetPawn();

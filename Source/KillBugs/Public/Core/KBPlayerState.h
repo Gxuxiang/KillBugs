@@ -48,6 +48,12 @@ public:
 	/** Server-only. */
 	void AddGold(int32 Amount);
 
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
+	int32 GetMaterials() const { return Materials; }
+
+	/** Server-only. Picked up from the ground; banked only if the team extracts. */
+	void AddMaterials(int32 Amount);
+
 	/**
 	 * Gives this player the profile total they arrived with. Server-only, and it only works ONCE.
 	 *
@@ -130,6 +136,21 @@ protected:
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
 	int32 Gold = 0;
+
+	/**
+	 * Materials picked up this run, carried until the run ends.
+	 *
+	 * Beside Gold because they behave like Gold: per player, replicated, server-authoritative,
+	 * and destroyed by the non-seamless travel home. Unlike Gold they are NOT banked on a wipe -
+	 * that difference is the whole point of searching, and it is decided at the run's result, not
+	 * here.
+	 *
+	 * On the PlayerState rather than a component on the pawn: materials have no state of their
+	 * own, and they have to survive a knockdown and revive inside a run. A pawn component would
+	 * reintroduce exactly the lifetime question this object already answers.
+	 */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
+	int32 Materials = 0;
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
 	int32 XP = 0;

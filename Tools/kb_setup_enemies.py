@@ -216,6 +216,11 @@ make_archetype(
     steering=STEER_SEEK,
     acceleration=900.0, turn_rate_degrees=420.0,
     xp_value=1, gold_value=0,
+    # Loot. These match the C++ defaults, so loot works before this script is re-run - a field
+    # missing from an existing asset reads as its default. Re-running is what makes the numbers
+    # editable per archetype in the asset instead of merely equal to the default.
+    material_drop_chance=0.15, material_drop_min=1, material_drop_max=1,
+    medkit_drop_chance=0.03,
     render_tier=TIER_INSTANCED,
 )
 
@@ -236,6 +241,9 @@ make_archetype(
     steering=STEER_CHARGE,
     acceleration=1600.0, turn_rate_degrees=200.0,
     xp_value=1, gold_value=0,
+    # Drops slightly more often than a Grunt, because there are far fewer of them.
+    material_drop_chance=0.20, material_drop_min=1, material_drop_max=1,
+    medkit_drop_chance=0.05,
     render_tier=TIER_INSTANCED,
 )
 
@@ -259,6 +267,9 @@ make_archetype(
     preferred_distance=320.0,
     acceleration=500.0, turn_rate_degrees=180.0,
     xp_value=5, gold_value=2,
+    # The payday: rare enough that finding one is worth the trip, and dropping 2-3 at a time.
+    material_drop_chance=0.60, material_drop_min=2, material_drop_max=3,
+    medkit_drop_chance=0.10,
     render_tier=TIER_INSTANCED,
 )
 

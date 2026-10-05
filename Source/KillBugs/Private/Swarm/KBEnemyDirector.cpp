@@ -7,6 +7,7 @@
 #include "KBConsoleVariables.h"
 #include "KBGameSettings.h"
 #include "KillBugs.h"
+#include "Loot/KBLootDirector.h"
 #include "GameFramework/PlayerController.h"
 #include "KBStats.h"
 #include "Net/UnrealNetwork.h"
@@ -508,6 +509,11 @@ void AKBEnemyDirector::SpawnBatch(int32 Count, const FVector& Centre, float Spaw
 	}
 }
 
+void AKBEnemyDirector::SetLootDirector(AKBLootDirector* InLootDirector)
+{
+	LootDirector = InLootDirector;
+}
+
 void AKBEnemyDirector::SetEnemyScaling(float InDamageTakenScale, float InSpeedScale)
 {
 	if (!HasAuthority())
@@ -643,33 +649,43 @@ bool AKBEnemyDirector::ApplyDamageToEnemy(int32 SimIndex, float Damage, AKBPlaye
 		return false;
 	}
 
-	// Reward before the entry disappears: the archetype is the only thing that knows the
-	// value, and it is gone once the sim entry is removed.
-	if (IsValid(Killer))
-	{
-		if (const UKBEnemyArchetype* Archetype =
-			Archetypes.IsValidIndex(Enemy.ArchetypeIndex) ? Archetypes[Enemy.ArchetypeIndex].Get() : nullptr)
-		{
-			// The killer's own XP multiplier, not the archetype's raw value.
-			//
-			// This multiplier was already folded into the stat sheet and exposed as
-			// GetXpMultiplier(), but nothing ever called it - so the card that grants +15% XP
-			// was a card that did nothing at all. Read at the moment of the kill rather than
-			// cached, for the same reason weapons read the damage multiplier at fire time: a
-			// card picked mid-run should change the very next kill.
-			float XpMultiplier = 1.f;
-			if (const APawn* KillerPawn = Killer->GetPawn())
-			{
-				if (const UKBStatSheetComponent* KillerStats =
-					KillerPawn->FindComponentByClass<UKBStatSheetComponent>())
-				{
-					XpMultiplier = KillerStats->GetXpMultiplier();
-				}
-			}
+	// Read everything that describes this death BEFORE the entry goes: `Enemy` is a reference
+	// into Sim, so it dangles the moment RemoveAt runs, and the archetype is only resolvable
+	// while the entry still exists. Both the reward and the drop need them, so they are hoisted
+	// here rather than resolved inside the reward's guard - a kill credited to nobody still has
+	// no killer, but it does still have an archetype and a place to fall.
+	const FVector DeathLocation = Enemy.Location;
+	const UKBEnemyArchetype* Archetype =
+		Archetypes.IsValidIndex(Enemy.ArchetypeIndex) ? Archetypes[Enemy.ArchetypeIndex].Get() : nullptr;
 
-			Killer->AddXP(FMath::RoundToInt(Archetype->XpValue * XpMultiplier));
-			Killer->AddGold(Archetype->GoldValue);
+	if (IsValid(Killer) && Archetype)
+	{
+		// The killer's own XP multiplier, not the archetype's raw value.
+		//
+		// This multiplier was already folded into the stat sheet and exposed as
+		// GetXpMultiplier(), but nothing ever called it - so the card that grants +15% XP
+		// was a card that did nothing at all. Read at the moment of the kill rather than
+		// cached, for the same reason weapons read the damage multiplier at fire time: a
+		// card picked mid-run should change the very next kill.
+		float XpMultiplier = 1.f;
+		if (const APawn* KillerPawn = Killer->GetPawn())
+		{
+			if (const UKBStatSheetComponent* KillerStats =
+				KillerPawn->FindComponentByClass<UKBStatSheetComponent>())
+			{
+				XpMultiplier = KillerStats->GetXpMultiplier();
+			}
 		}
+
+		Killer->AddXP(FMath::RoundToInt(Archetype->XpValue * XpMultiplier));
+		Killer->AddGold(Archetype->GoldValue);
+	}
+
+	// Loot is a property of the bug dying, not a reward for killing it - see RollDropForDeath.
+	// Rolled for every death, credited or not.
+	if (Archetype && LootDirector.IsValid())
+	{
+		LootDirector->RollDropForDeath(DeathLocation, *Archetype);
 	}
 
 	// Death is a removal from both arrays. Removing at the same index preserves the

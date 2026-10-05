@@ -8,8 +8,10 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "KBGameSettings.h"
+#include "KillBugs.h"
 #include "Lobby/KBLobbyGameState.h"
 #include "Net/KBSessionSubsystem.h"
+#include "Persistence/KBProfileSubsystem.h"
 
 /**
  * Named, NOT anonymous, and every use is qualified through the Style alias below.
@@ -99,6 +101,22 @@ UKBSessionSubsystem* AKBLobbyHud::GetSessions() const
 	UWorld* World = GetWorld();
 	UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
 	return GameInstance ? GameInstance->GetSubsystem<UKBSessionSubsystem>() : nullptr;
+}
+
+void AKBLobbyHud::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// The drawn stash line is invisible to a headless run - DrawHUD never executes under -nullrhi
+	// - so this is the only evidence that the lobby world resolved the profile at all. Without
+	// it, "the line is missing" and "the subsystem was null" look identical from a log.
+	const UWorld* World = GetWorld();
+	const UKBProfileSubsystem* Profile = (World && World->GetGameInstance())
+		? World->GetGameInstance()->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+
+	UE_LOG(LogKillBugs, Display, TEXT("KB Lobby: stash readout gold %d | materials %d"),
+		Profile ? Profile->GetBankedGold() : 0,
+		Profile ? Profile->GetBankedMaterials() : 0);
 }
 
 void AKBLobbyHud::DrawHUD()
@@ -233,6 +251,39 @@ void AKBLobbyHud::DrawTitle(const FBox2D& Panel)
 	const float RuleY = Panel.Min.Y + Style::Pad + 42.f;
 	DrawRect(Style::RuleFill, Panel.Min.X + Style::Pad, RuleY,
 		Style::PanelWidth - Style::Pad * 2.f, 2.f);
+
+	DrawStash(Panel, RuleY);
+}
+
+void AKBLobbyHud::DrawStash(const FBox2D& Panel, float RuleY)
+{
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font)
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const UKBProfileSubsystem* Profile = (World && World->GetGameInstance())
+		? World->GetGameInstance()->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+
+	if (!Profile)
+	{
+		return;
+	}
+
+	// Read straight off this machine's own profile rather than off a PlayerState: the stash is
+	// this machine's, it needs no handshake from the host to be correct, and it cannot be stale.
+	const FString Line = FString::Printf(TEXT("金币 %d      材料 %d"),
+		Profile->GetBankedGold(), Profile->GetBankedMaterials());
+
+	float Width = 0.f;
+	float Height = 0.f;
+	GetTextSize(Line, Width, Height, Font, 1.0f);
+
+	// Right-aligned on the title rule, level with the title.
+	DrawText(Line, Style::Dim, Panel.Max.X - Style::Pad - Width, Panel.Min.Y + Style::Pad + 4.f,
+		Font, 1.0f, false);
 }
 
 void AKBLobbyHud::DrawLoadingScreen()

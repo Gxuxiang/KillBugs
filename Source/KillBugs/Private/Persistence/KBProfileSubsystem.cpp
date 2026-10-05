@@ -117,9 +117,13 @@ void UKBProfileSubsystem::LoadProfile()
 	// Clamped on the way in as well as out: the file is editable, and every later use of this
 	// number (including seeding it into a PlayerState) would rather see a sane value.
 	BankedGold = FMath::Clamp(Profile->Gold, 0, MaxBankedGold());
+	BankedMaterials = FMath::Clamp(Profile->Materials, 0, MaxBankedMaterials());
 
-	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: loaded '%s' (user %d): %d gold"),
-		*Slot, User, BankedGold);
+	// The version is reported rather than enforced: a file written by an older build is a valid
+	// file, and USaveGame's tagged format means its missing fields already read as their defaults.
+	UE_LOG(LogKillBugs, Display,
+		TEXT("KBProfile: loaded '%s' (user %d): %d gold | %d materials (save v%d)"),
+		*Slot, User, BankedGold, BankedMaterials, Profile->SaveVersion);
 }
 
 bool UKBProfileSubsystem::SaveProfile() const
@@ -133,6 +137,7 @@ bool UKBProfileSubsystem::SaveProfile() const
 	}
 
 	Profile->Gold = BankedGold;
+	Profile->Materials = BankedMaterials;
 	Profile->SaveVersion = UKBSaveGame::CurrentVersion;
 
 	const bool bSaved = UGameplayStatics::SaveGameToSlot(Profile, GetSlotName(), GetUserIndex());
@@ -150,6 +155,26 @@ bool UKBProfileSubsystem::SaveProfile() const
 void UKBProfileSubsystem::BeginRun()
 {
 	bBankedThisRun = false;
+	bMaterialsBankedThisRun = false;
+}
+
+void UKBProfileSubsystem::BankRunMaterials(int32 RunMaterials)
+{
+	if (bMaterialsBankedThisRun)
+	{
+		return;
+	}
+
+	bMaterialsBankedThisRun = true;
+
+	const int32 Before = BankedMaterials;
+	BankedMaterials = FMath::Clamp(BankedMaterials + FMath::Max(RunMaterials, 0), 0, MaxBankedMaterials());
+
+	const bool bSaved = SaveProfile();
+
+	UE_LOG(LogKillBugs, Display,
+		TEXT("KBProfile: banked materials %d -> %d (%s)"),
+		Before, BankedMaterials, bSaved ? TEXT("written") : TEXT("WRITE FAILED"));
 }
 
 void UKBProfileSubsystem::BankRunGold(int32 RunGold)
@@ -178,7 +203,9 @@ void UKBProfileSubsystem::ResetProfile()
 	UGameplayStatics::DeleteGameInSlot(GetSlotName(), GetUserIndex());
 
 	BankedGold = 0;
+	BankedMaterials = 0;
 	bBankedThisRun = false;
+	bMaterialsBankedThisRun = false;
 
 	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: '%s' (user %d) deleted - starting at 0"),
 		*GetSlotName(), GetUserIndex());
@@ -206,8 +233,9 @@ namespace KBProfileCommands
 		const FString Slot = UKBProfileSubsystem::GetSlotName();
 		const int32 User = UKBProfileSubsystem::GetUserIndex();
 
-		UE_LOG(LogKillBugs, Display, TEXT("KBProfile: banked %d | slot '%s' (user %d) | file %s"),
-			Profile->GetBankedGold(), *Slot, User,
+		UE_LOG(LogKillBugs, Display,
+			TEXT("KBProfile: banked %d gold | %d materials | slot '%s' (user %d) | file %s"),
+			Profile->GetBankedGold(), Profile->GetBankedMaterials(), *Slot, User,
 			UGameplayStatics::DoesSaveGameExist(Slot, User) ? TEXT("exists") : TEXT("missing"));
 	}
 

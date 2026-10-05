@@ -115,6 +115,7 @@ void AKBPlayerController::TryBindToRunState()
 	}
 
 	RunState->OnWavePhaseChanged.AddDynamic(this, &AKBPlayerController::HandleWavePhaseChanged);
+	RunState->OnRunResultChanged.AddDynamic(this, &AKBPlayerController::HandleRunResultChanged);
 	bBoundToRunState = true;
 
 	// Logged because the failure mode this guards against is silence: a controller that never
@@ -143,6 +144,38 @@ void AKBPlayerController::HandleWavePhaseChanged(EKBWavePhase NewPhase)
 	// nothing here changes that. The bank adds it on top. BankRunGold latches, so both endings
 	// reaching RunOver through the same funnel is all this needs.
 	Profile->BankRunGold(KBPlayerState->GetGold());
+}
+
+void AKBPlayerController::HandleRunResultChanged(EKBRunResult NewResult)
+{
+	if (!IsLocalController() || NewResult == EKBRunResult::InProgress)
+	{
+		return;
+	}
+
+	const UGameInstance* GameInstance = GetGameInstance();
+	UKBProfileSubsystem* Profile =
+		GameInstance ? GameInstance->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+
+	const AKBPlayerState* KBPlayerState = GetPlayerState<AKBPlayerState>();
+	if (!Profile || !KBPlayerState)
+	{
+		return;
+	}
+
+	const int32 Carried = KBPlayerState->GetMaterials();
+
+	if (NewResult == EKBRunResult::Extracted)
+	{
+		Profile->BankRunMaterials(Carried);
+		return;
+	}
+
+	// The wipe. Nothing to do - the PlayerState and its materials are destroyed by the travel
+	// home - but silence here would be the wrong kind of quiet: the player lost something the
+	// design says they were supposed to lose, and the log is where that becomes visible.
+	UE_LOG(LogKillBugs, Display,
+		TEXT("KBProfile: wiped out - %d carried material(s) lost, not banked"), Carried);
 }
 
 void AKBPlayerController::BuildRuntimeInput()

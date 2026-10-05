@@ -22,11 +22,24 @@ class KILLBUGS_API UKBSaveGame : public USaveGame
 
 public:
 	/** The current on-disk layout. Bump when a field is added or its meaning changes. */
-	static constexpr int32 CurrentVersion = 1;
+	static constexpr int32 CurrentVersion = 2;
 
 	/** The persisted total, across every run this machine has ever finished. */
 	UPROPERTY()
 	int32 Gold = 0;
+
+	/**
+	 * Materials brought home by successful extractions. A wipe loses them.
+	 *
+	 * A scalar rather than a container, because there is exactly one kind of material so far and
+	 * a container with one element is a taxonomy with one element. The format is what makes it
+	 * extensible: USaveGame serializes by tag, so adding tiers later is an additive field, and a
+	 * file written here loads with that field empty.
+	 *
+	 * A v1 file - gold only - loads with this field at its default of 0. No migration.
+	 */
+	UPROPERTY()
+	int32 Materials = 0;
 
 	UPROPERTY()
 	int32 SaveVersion = CurrentVersion;

@@ -16,6 +16,7 @@
 #include "Interaction/KBChannelComponent.h"
 #include "KillBugs.h"
 #include "KBGameSettings.h"
+#include "Loot/KBLootDirector.h"
 #include "Net/KBSessionSubsystem.h"
 #include "Swarm/KBEnemyDirector.h"
 #include "UI/KBHud.h"
@@ -34,6 +35,7 @@ AKBGameMode::AKBGameMode()
 	EnemyDirectorClass = AKBEnemyDirector::StaticClass();
 	ProjectileDirectorClass = AKBProjectileDirector::StaticClass();
 	ExtractionZoneClass = AKBExtractionZone::StaticClass();
+	LootDirectorClass = AKBLootDirector::StaticClass();
 	HUDClass = AKBHud::StaticClass();
 
 	// Must be set here, not in BeginPlay: tick functions are registered during actor
@@ -66,6 +68,22 @@ void AKBGameMode::BeginPlay()
 	{
 		GetWorld()->SpawnActor<AKBProjectileDirector>(
 			ProjectileDirectorClass, FTransform::Identity, SpawnParams);
+	}
+
+	// Everything lying on the ground, in one actor - the same shape as the swarm and the bullets.
+	// Spawned before the extraction zone so the enemy director can be handed a pointer to it
+	// below, at the same moment the two are wired together.
+	if (LootDirectorClass)
+	{
+		LootDirector = GetWorld()->SpawnActor<AKBLootDirector>(
+			LootDirectorClass, FTransform::Identity, SpawnParams);
+
+		if (LootDirector && EnemyDirector)
+		{
+			// Injected rather than looked up per death: the answer never changes, and a lookup
+			// on every kill would be work for a pointer that is already known.
+			EnemyDirector->SetLootDirector(LootDirector);
+		}
 	}
 
 	// The extraction zone exists from the start but is inactive: it is opened and closed on the
@@ -874,6 +892,20 @@ void AKBGameMode::ConsoleExtractSchedule(const TArray<FString>& Args, UWorld* Wo
 	Mode->ScheduleExtractionForWave(RunState->GetWaveIndex() + WavesFromNow);
 }
 
+void AKBGameMode::ConsoleRunWipe(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	if (!Mode)
+	{
+		return;
+	}
+
+	// Ends the run the way a team wipe does, without having to down four players first. EndRun
+	// is idempotent and latches the result, so this cannot corrupt a run that already ended
+	// some other way.
+	Mode->EndRun(EKBRunResult::WipedOut);
+}
+
 void AKBGameMode::BeginCardDraft(int32 ForWaveIndex)
 {
 	AKBGameState* RunState = GetGameState<AKBGameState>();
@@ -1212,6 +1244,12 @@ static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractSchedule(
 	TEXT("KB.Extract.Schedule"),
 	TEXT("KB.Extract.Schedule [wavesFromNow] - put the zone on the schedule (default: next wave)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractSchedule));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleRunWipe(
+	TEXT("KB.Run.Wipe"),
+	TEXT("KB.Run.Wipe - end the run as a team wipe, without downing anybody. For reaching the "
+	     "wipe branch (materials are lost, not banked) in a headless test."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleRunWipe));
 
 static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractSelfTest(
 	TEXT("KB.Extract.SelfTest"),
