@@ -54,6 +54,15 @@ public:
 	/** Server only: starts the run without a session, for solo play and for testing. */
 	void StartSoloRun();
 
+	/**
+	 * Server only. Puts a player's banked total onto their fresh lobby PlayerState.
+	 *
+	 * Reached from AKBLobbyPlayerController::ServerSeedGold, which is the client's own claim about
+	 * a file only it can read. Nothing here validates that claim - see AKBPlayerState::SeedGold
+	 * for why that is the accepted shape rather than a gap.
+	 */
+	void SeedPlayerGold(AKBPlayerState* PlayerState, int32 InGold);
+
 protected:
 	/** Monotonic counter feeding AKBPlayerState::KBPlayerIndex, as in the arena's GameMode. */
 	int32 NextPlayerIndex = 0;

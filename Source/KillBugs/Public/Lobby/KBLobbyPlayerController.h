@@ -43,6 +43,22 @@ public:
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerRequestSolo();
 
+	/**
+	 * Server RPC. Hands this player's banked profile total to the server so the lobby's fresh
+	 * PlayerState can carry it.
+	 *
+	 * The value comes from this machine's save file, which is why it is the client that sends it
+	 * rather than the server that reads it - and why the server cannot verify it. That is the
+	 * accepted cost of each machine owning its own profile; see AKBPlayerState::SeedGold.
+	 *
+	 * Lobby-only by construction, and that is the safety property: the arena uses a different
+	 * PlayerControllerClass, and travel here is non-seamless, so no instance of this class exists
+	 * in the arena for a client to call this on mid-run. The server also only acts when the
+	 * GameMode is the lobby's, and the seed itself latches.
+	 */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerSeedGold(int32 InGold);
+
 private:
 	/** Routes a click at the lobby's buttons and server rows. */
 	void HandleLobbyClick();

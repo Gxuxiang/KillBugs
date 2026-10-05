@@ -190,6 +190,18 @@ bool AKBLobbyGameMode::AreAllPlayersReady() const
 	return LobbyState && LobbyState->AreAllPlayersReady();
 }
 
+void AKBLobbyGameMode::SeedPlayerGold(AKBPlayerState* PlayerState, int32 InGold)
+{
+	if (!HasAuthority() || !PlayerState)
+	{
+		return;
+	}
+
+	// SeedGold latches after the first call, so a late or repeated seed cannot reshape a total
+	// that has since been earned.
+	PlayerState->SeedGold(InGold);
+}
+
 void AKBLobbyGameMode::StartSoloRun()
 {
 	if (!HasAuthority())

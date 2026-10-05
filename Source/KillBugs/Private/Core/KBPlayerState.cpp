@@ -49,6 +49,25 @@ void AKBPlayerState::AddGold(int32 Amount)
 	OnRunStateChanged.Broadcast();
 }
 
+void AKBPlayerState::SeedGold(int32 InGold)
+{
+	if (!HasAuthority() || bGoldSeeded)
+	{
+		return;
+	}
+
+	bGoldSeeded = true;
+
+	// Set, not added: the profile total IS this player's starting gold. Clamped because the value
+	// arrives from a file this process did not write.
+	Gold = FMath::Clamp(InGold, 0, TNumericLimits<int32>::Max() / 2);
+
+	OnRunStateChanged.Broadcast();
+
+	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: seeded player %d with %d gold"),
+		KBPlayerIndex, Gold);
+}
+
 void AKBPlayerState::AddXP(int32 Amount)
 {
 	if (!HasAuthority() || Amount == 0)

@@ -11,6 +11,7 @@
 #include "Lobby/KBLobbyGameMode.h"
 #include "Lobby/KBLobbyGameState.h"
 #include "Net/KBSessionSubsystem.h"
+#include "Persistence/KBProfileSubsystem.h"
 #include "UI/KBLobbyHud.h"
 
 AKBLobbyPlayerController::AKBLobbyPlayerController()
@@ -63,6 +64,18 @@ void AKBLobbyPlayerController::BeginPlay()
 		SetInputMode(InputMode);
 
 		bShowMouseCursor = true;
+
+		// Hand the server this machine's banked total so the lobby's fresh PlayerState can show
+		// it. Fire-and-forget: the run does not wait on it, and a failure costs a number on
+		// screen rather than anything in the save file, because the bank never reads back from
+		// authoritative state.
+		if (const UGameInstance* GameInstance = GetGameInstance())
+		{
+			if (const UKBProfileSubsystem* Profile = GameInstance->GetSubsystem<UKBProfileSubsystem>())
+			{
+				ServerSeedGold(Profile->GetBankedGold());
+			}
+		}
 	}
 
 	if (UEnhancedInputLocalPlayerSubsystem* InputSubsystem =
@@ -251,4 +264,32 @@ void AKBLobbyPlayerController::ServerRequestSolo_Implementation()
 	{
 		LobbyGameMode->StartSoloRun();
 	}
+}
+
+void AKBLobbyPlayerController::ServerSeedGold_Implementation(int32 InGold)
+{
+	// The GameMode is looked up rather than assumed: this is the second lock on "lobby only",
+	// after the fact that this controller class does not exist in the arena. If a version of the
+	// arena ever reuses it, the seed still cannot land mid-run.
+	AKBLobbyGameMode* LobbyGameMode =
+		GetWorld() ? GetWorld()->GetAuthGameMode<AKBLobbyGameMode>() : nullptr;
+
+	if (!LobbyGameMode)
+	{
+		UE_LOG(LogKillBugs, Warning,
+			TEXT("KBProfile: a gold seed arrived outside the lobby - ignored (player %s)"),
+			*GetNameSafe(this));
+		return;
+	}
+
+	// The PlayerState is the CALLING controller's, never one named by the client.
+	LobbyGameMode->SeedPlayerGold(GetPlayerState<AKBPlayerState>(), InGold);
+}
+
+bool AKBLobbyPlayerController::ServerSeedGold_Validate(int32 InGold)
+{
+	// Bounded so a tampered client cannot hand the server a negative number or something that
+	// would overflow later arithmetic. It cannot check the value is EARNED - the server has no
+	// source for that, by design; see the note on AKBPlayerState::SeedGold.
+	return InGold >= 0 && InGold <= UKBProfileSubsystem::MaxBankedGold();
 }

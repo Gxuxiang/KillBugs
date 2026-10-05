@@ -37,6 +37,7 @@
 | 局末结算 | `AKBGameMode::EndRun` + `AKBGameState::RunResult` | 一局**唯一的出口**：团灭（以后撤离成功走同一条路）→ 结算界面 → 回大厅 |
 | 交互原语（读条/区域） | `UKBChannelComponent` | "站在区域内 + 条件持续满足 + 读条 N 秒"。撤离、救援、开门共用；暂停/重置是每处自己选的 |
 | 救援 | `AKBCharacter` 上的 `UKBChannelComponent` | 倒地者投影出救助圈，队友进圈读条；**离开则重新计时**；救起回复一半血。圈和进度由 `AKBHud::DrawRescueCircles` 画在地面上 |
+| **存档** | `UKBProfileSubsystem`（GameInstanceSubsystem）+ `UKBSaveGame` | **每台机器一个本地档**，只存金币。竞技场的 `Gold` 含义不变（这一局的收入），总额在子系统里，结算时加进去。大厅靠一个客户端→主机的 RPC 把总额种进新的 PlayerState（只为显示与验证）。见下面的「存档」一节 |
 | **撤离** | `AKBExtractionZone` + 复用的 `UKBChannelComponent` | **两个互斥的钟**：开启时间只在「不是全员在圈内」时走，走完 = 撤离失败（关闭、**这一局继续**、过 N 波再来）；撤离计时只在全员在圈内时走（同时把开启时间冻住），走满 = `EndRun(Extracted)`。每 N 波出现在**离玩家最远的候选点**，出现前有「N 波后出现」预告，出画时有屏幕边缘箭头。**虫潮挂在读条上**：开点无压力，全员进圈那一刻来一波（每点一次）+ 维持 12/秒；有人出圈就停 |
 | 属性 | `UKBStatSheetComponent` | 挂在 Pawn 上，不是 PlayerState |
 | 音频 | `UKBAudioSubsystem` + `UKBSwarmAudioComponent` | 音乐床随复制的阶段交叉淡入；UI 音效；**虫子移动音按最近 N 只定位播放** |
@@ -46,6 +47,98 @@
 
 **为什么 UI 用 Canvas 不用 UMG**：整个游戏只有大厅和战斗两块界面，搭控件树的开销大于它带来的好处。
 真要换成 UMG，读的数据都在复制的 PlayerState/GameState 上，不需要动玩法代码。
+
+---
+
+## 存档：金币跨局（2026-10-05，阶段 2 的「存」第一刀）
+
+设计里「**团灭时金币不掉**」以前只是半句话——换图是非无缝的，PlayerState 连同 Gold/XP/等级一起销毁，
+所谓"金币不掉"根本没有实现。现在实现了。
+
+### 核心模型：竞技场里的 `Gold` 含义不变
+
+`AKBPlayerState::Gold` 仍然是**这一局的收入**（从 0 开始，只有 `AddGold` 写它）。
+持久化的**总额**放在 `UKBProfileSubsystem`（`UGameInstanceSubsystem`）里，结算时把本局收入加进去。
+
+**这样设计是为了绕开一个不对称**：`AddGold` 是服务端权威的，而存档在每个玩家本地。
+如果总额要写进权威状态，就必须让客户端去改权威金币（或者让服务端去读客户端的文件）。
+把总额放在子系统里，这条冲突就不存在了——没有任何一处需要客户端写权威状态。
+
+**被否掉的方案**：「把总额种进竞技场 PlayerState，结算时整体覆盖存盘」。它有个真实的数据丢失模式：
+某次种入没到，竞技场里的值只有本局收入（比如 200），覆盖上去就把总额（1000）冲成 200。
+现在的模型只会**加**，不可能出现这种事。
+
+### 读档：一个只为显示和验证的握手
+
+客户端不能写权威金币，所以大厅里那具新 PlayerState 要服务端来填：
+
+`AKBLobbyPlayerController::BeginPlay`（本地控制器）→ `ServerSeedGold(总额)`
+→ `AKBLobbyGameMode::SeedPlayerGold` → `AKBPlayerState::SeedGold`（服务端，闩一次）。
+
+**为什么局中调不到**：`PlayerControllerClass` 按世界设，大厅是 `AKBLobbyPlayerController`、
+竞技场是 `AKBPlayerController`；非无缝换图把前者销毁掉，所以竞技场里没有这个类的实例，
+RPC 的函数 ID 没有对象可路由。再加一层：GameMode 必须是大厅的，且 `SeedGold` 只生效一次。
+
+**这个握手失败也不影响存档**——总额从来不从权威状态读回来，最坏情况是大厅那个数字显示 0。
+
+> **写进注释的事实**：改过的客户端可以在进大厅时虚报金额，服务端没有来源去核对。
+> 这是"客户端自己存档"的固有代价，等价于直接改 `.sav`，而这是个局域网合作游戏。
+> 代码里直说了，没有假装服务端能校验。
+
+### 触发：本地机器看到 `RunOver` 就存
+
+`OnWavePhaseChanged` 在**主机和客户端都会触发**（服务端本地广播 / 客户端 `OnRep`），
+所以一条路径两边通吃。`AKBPlayerController` 只在 `IsLocalController()` 时入账，
+**主机也是玩家**，走的是和自己当客户端时一模一样的那条路。
+
+绑定是从 `Tick` 里重试的，不是在 `BeginPlay` 一次搞定——客户端上 GameState 可能来得晚，
+而"没绑上"的症状是这台机器**永远不入账**，安静得像是没事发生。
+
+### 最值得记的一条：引擎的存档加载器不拒绝坏文件，它回退
+
+我给 `LoadProfile` 写了"读不出来就归零"的守卫，然后拿一个 22 字节的文本文件当存档测试——
+**崩了**，`FName's 1023 max length exceeded. Got 544501613 characters`，在 `LoadGameFromSlot` 内部，
+我的 `Cast` 根本轮不到。
+
+原因在 `FSaveGameHeader::Read`：
+
+```cpp
+if (FileTypeTag != UE_SAVEGAME_FILE_TYPE_TAG)
+{
+    // This is a very old saved game, back up the file pointer to the beginning and assume version 1
+    // This is unlikely to work without additional licensee-specific modifications to this code
+    MemoryReader.Seek(0);
+    SaveGameFileVersion = FSaveGameFileVersion::InitialVersion;
+}
+```
+
+**不认识的 tag 不会被拒绝，会被当成"很老的存档"从头再读一遍**——于是按垃圾内容读长度。
+引擎注释里那句 "unlikely to work" 就是实话。所以现在加载前自己看一眼文件头的 `GVAS` 魔数。
+
+> 顺带记一下容易走错的地方：我第一版检查的是 UE **package** 的魔数（`PACKAGE_FILE_TAG`），
+> 结果把**好的存档全部误判并删掉**了。`.sav` 不是 package，它的头是 `GVAS`
+> （`UE_SAVEGAME_FILE_TYPE_TAG = 0x53415647`）。测试时"有档往返"这一条立刻暴露了它——
+> 只测坏档是测不出误伤的。
+
+### 验证（全部无头实测）
+
+| 情形 | 判据 |
+|---|---|
+| 首次无档 | `KBProfile: no profile at 'KillBugsProfile' (user 0) - starting at 0` |
+| 赚金币并入账 | `+20 gold to the run total (now 20)` → `banked 0 -> 22 (written)`（多出的 2 是守卫时打死的虫） |
+| 换图后种回 | `seeded player 0 with 22 gold`，且大厅 `KB.Player.Stats` 读到 `gold 22` |
+| **团灭也是同一条路** | `banked 22 -> 32`，`Run over (wiped out)` → 一样种回 |
+| 新进程读档 | `loaded 'KillBugsProfile' (user 0): 22 gold` |
+| 坏档 | `is not a readable save - deleting it and starting at 0`，**不崩** |
+| 好档不被误伤 | 往返读回原值（这一条是加魔数检查后必须补测的） |
+
+### 已知取舍（不要以后踩到）
+
+- **打到一半直接退出，那一局的金币就没了**（用户已确认接受）。只有走到结算（撤离成功或团灭）才写盘。
+- **本地档可以改**，服务端验不了——见上面那条注释。
+- **同机双进程共用一个 `.sav`**（一台机器一个档）。这是"每个玩家本地存"的固有结果，不是 bug。
+  真要在同机上测隔离，加一个**测试专用**的 `KB.Profile.SlotSuffix` cvar 就够，不要为此复杂化正式路径。
+- **大厅没有金币读数**。用户要的是持久化不是 UI；`KB.Profile.Gold` 和种进 PlayerState 的那个值足够验证。
 
 ---
 
@@ -614,6 +707,14 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 | `KB.Swarm.Kill <n>` | 杀 n 只随机虫（走正常伤害/死亡路径） |
 | `KB.Debug.PlacePlayer <x> <y>` | 把本地玩家的 pawn 传送到 (x, y)。注意 Z 写死 200，等于重新放回空中 |
 
+**存档**
+
+| 命令 | 作用 |
+|---|---|
+| `KB.Profile.Gold` | 打印本地档的总额、槽位名、文件在不在 |
+| `KB.Profile.Reset` | 删档并归零（测"首次无档"用） |
+| `KB.Profile.AddGold <n>` | 给**本地玩家这一局**的金币加 n（服务端）。为什么需要它：`KB.Swarm.Kill` 传的 killer 是 nullptr，根本不产生金币 |
+
 **撤离**
 
 | 命令 | 作用 |
@@ -644,11 +745,9 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 
 ### 会挡住新设计的一件
 
-0. **换图会清空 PlayerState，所以金币目前跨不了局。**
-   `bUseSeamlessTravel = false`，每次 travel 之后 Gold/XP/等级全部重建归零。
-   而设计里"团灭时金币不掉、金币买局外商店"要求金币**跨局持久化** ——
-   所以它必须在回大厅 travel **之前**写进存档。
-   `AKBGameMode::ReturnToLobby()` 里已经留了注释标出这个位置。
+0. ~~**换图会清空 PlayerState，所以金币目前跨不了局。**~~ **已完成 2026-10-05**（见「本轮的存档」）。
+   剩下的只有**仓库**：材料/装备的容器还没定，因为「搜」还没做——等有东西可装再定，
+   现在定就是拍脑袋。
 
 ### 内容缺口（功能已接好，只差资源或一个勾）
 

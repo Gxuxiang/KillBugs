@@ -5,10 +5,12 @@
 #include "Core/KBGameState.h"
 #include "Core/KBPlayerState.h"
 #include "EnhancedInputSubsystems.h"
+#include "Engine/GameInstance.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "KillBugs.h"
 #include "Net/UnrealNetwork.h"
+#include "Persistence/KBProfileSubsystem.h"
 #include "UObject/ConstructorHelpers.h"
 #include "UI/KBHud.h"
 
@@ -70,6 +72,77 @@ void AKBPlayerController::BeginPlay()
 			InputSubsystem->AddMappingContext(RuntimeMappingContext, 1);
 		}
 	}
+
+	// Only the local controller banks anything: on a listen server every player's controller sees
+	// the phase change, and it is this machine's own earnings that go to this machine's profile.
+	if (IsLocalController())
+	{
+		if (const UGameInstance* GameInstance = GetGameInstance())
+		{
+			if (UKBProfileSubsystem* Profile = GameInstance->GetSubsystem<UKBProfileSubsystem>())
+			{
+				// A fresh arena means a fresh run, so the once-per-run latch has to clear here -
+				// the subsystem outlives the world the last run ended in.
+				Profile->BeginRun();
+			}
+		}
+	}
+}
+
+void AKBPlayerController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (!bBoundToRunState)
+	{
+		TryBindToRunState();
+	}
+}
+
+void AKBPlayerController::TryBindToRunState()
+{
+	if (!IsLocalController())
+	{
+		// Nothing to bind: a remote controller must not bank the local player's gold.
+		bBoundToRunState = true;
+		return;
+	}
+
+	AKBGameState* RunState = GetWorld() ? GetWorld()->GetGameState<AKBGameState>() : nullptr;
+	if (!RunState)
+	{
+		return; // Not yet. Tick will ask again.
+	}
+
+	RunState->OnWavePhaseChanged.AddDynamic(this, &AKBPlayerController::HandleWavePhaseChanged);
+	bBoundToRunState = true;
+
+	// Logged because the failure mode this guards against is silence: a controller that never
+	// bound would simply never bank anything, and nothing else would say so.
+	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: this machine will bank its gold when the run ends"));
+}
+
+void AKBPlayerController::HandleWavePhaseChanged(EKBWavePhase NewPhase)
+{
+	if (NewPhase != EKBWavePhase::RunOver || !IsLocalController())
+	{
+		return;
+	}
+
+	const UGameInstance* GameInstance = GetGameInstance();
+	UKBProfileSubsystem* Profile =
+		GameInstance ? GameInstance->GetSubsystem<UKBProfileSubsystem>() : nullptr;
+
+	const AKBPlayerState* KBPlayerState = GetPlayerState<AKBPlayerState>();
+	if (!Profile || !KBPlayerState)
+	{
+		return;
+	}
+
+	// The run's earnings, not a total: AKBPlayerState::Gold means "what this run earned" and
+	// nothing here changes that. The bank adds it on top. BankRunGold latches, so both endings
+	// reaching RunOver through the same funnel is all this needs.
+	Profile->BankRunGold(KBPlayerState->GetGold());
 }
 
 void AKBPlayerController::BuildRuntimeInput()

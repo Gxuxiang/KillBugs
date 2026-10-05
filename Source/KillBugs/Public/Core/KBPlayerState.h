@@ -48,6 +48,22 @@ public:
 	/** Server-only. */
 	void AddGold(int32 Amount);
 
+	/**
+	 * Gives this player the profile total they arrived with. Server-only, and it only works ONCE.
+	 *
+	 * A separate entry point from AddGold rather than a use of it, for two reasons. The number
+	 * comes from the client's own save file and is therefore not something the server can check -
+	 * so it belongs to a call that is obviously about trust rather than one that looks like a
+	 * reward. And it must not be repeatable: a second seed arriving late, or on purpose, would
+	 * reshape a total that has since been earned.
+	 *
+	 * The trust part is worth stating plainly: a modified client can claim any number here, and
+	 * the server has no source to contradict it. That is inherent to letting each machine own its
+	 * own profile, and it is equivalent to editing the .sav file directly. This is a LAN co-op
+	 * game; the alternative is a server-owned profile, which was considered and rejected.
+	 */
+	void SeedGold(int32 InGold);
+
 	/** Server-only. */
 	void AddXP(int32 Amount);
 
@@ -123,4 +139,7 @@ protected:
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
 	bool bIsDowned = false;
+
+	/** Not replicated: it is only ever consulted on the authority, which is where seeding happens. */
+	bool bGoldSeeded = false;
 };

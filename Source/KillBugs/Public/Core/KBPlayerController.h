@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/KBGameState.h"
 #include "GameFramework/PlayerController.h"
 #include "KBPlayerController.generated.h"
 
@@ -49,12 +50,35 @@ public:
 	 */
 	bool TryPickCardUnderCursor();
 
+	/**
+	 * This machine's run is over: fold its earnings into the local profile and write them down.
+	 *
+	 * Bound to AKBGameState::OnWavePhaseChanged, which fires on the host (broadcast locally by
+	 * SetWavePhaseServer) and on a client (broadcast by OnRep_WavePhase) - so one handler covers
+	 * both, and the listen server is not a special case.
+	 */
+	UFUNCTION()
+	void HandleWavePhaseChanged(EKBWavePhase NewPhase);
+
 protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
 
 	/** Builds FireAction and its mapping context in code; see the member comments. */
 	void BuildRuntimeInput();
+
+	/**
+	 * Binds HandleWavePhaseChanged once the GameState exists.
+	 *
+	 * Retried from Tick rather than done in BeginPlay, because on a client the GameState can
+	 * arrive after the controller begins play - and a missed bind would silently mean "this
+	 * machine never banks its gold", which is exactly the class of failure that looks like
+	 * nothing happening.
+	 */
+	void TryBindToRunState();
+
+	bool bBoundToRunState = false;
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
