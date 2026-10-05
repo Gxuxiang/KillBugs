@@ -14,3 +14,10 @@ TAutoConsoleVariable<float> CVarKBSwarmAudioLog(
 	     "were candidates, why the nearest one was or was not heard, and the state of every "
 	     "emitter slot."),
 	ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarKBPlayerGod(
+	TEXT("KB.Player.God"),
+	0,
+	TEXT("1 = the player takes no damage (default 0). Testing switch: KB.Player.God 1 to walk "
+	     "through a wave, 0 to fight it."),
+	ECVF_Default);

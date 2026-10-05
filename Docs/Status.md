@@ -602,6 +602,32 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 
 逐段判据见 [`Lobby.md`](Lobby.md)。调试命令：`KB.Lobby.{Host,Find,Join,JoinFound,Ready,Start,Solo}`。
 
+### 调试命令速查（`~` 打开控制台）
+
+**测试用的作弊指令**
+
+| 命令 | 作用 |
+|---|---|
+| `KB.Player.God 1` | **玩家不掉血**（0 关，默认关）。验过：300 只虫围着啃，关时血量 100%→76%→27%，开时全程 100% |
+| `KB.Swarm.Cull` | **一键清场**，把场上所有虫一次移除（比 `KB.Swarm.Kill <n>` 快，后者是一只只走伤害路径） |
+| `KB.Swarm.Count <n>` | 重设场上数量（默认 500） |
+| `KB.Swarm.Kill <n>` | 杀 n 只随机虫（走正常伤害/死亡路径） |
+| `KB.Debug.PlacePlayer <x> <y>` | 把本地玩家的 pawn 传送到 (x, y)。注意 Z 写死 200，等于重新放回空中 |
+
+**撤离**
+
+| 命令 | 作用 |
+|---|---|
+| `KB.Extract.OpenNow [x] [y] [窗口秒] [读条秒]` | 立刻开点。不给 x/y 就用排期那套选点逻辑。时间参数是为了不用真等 60+30 秒 |
+| `KB.Extract.Gather` / `Scatter [距离]` | 把所有人传进圈 / 传出去（关门/开门） |
+| `KB.Extract.Fail` | 立刻让窗口耗尽，走失败路径（**这局必须继续**） |
+| `KB.Extract.Schedule [还有几波]` | 重排出现时间 |
+| `KB.Extract.State` | 打一行状态：开/关、中心、窗口剩余、读条进度、逐玩家在不在圈内 |
+| `KB.Extract.SelfTest` | **一条命令走完整个状态机**（开点→窗口耗尽→进圈冻结→出圈保留进度→读满成功）。跑在 Warmup 里，所以不会被虫咬死。日志每一步都写了它要证什么 |
+
+**其他**：`KB.Swarm.PerfLog <秒>`（场上数量/耗时/**玩家血量**，调平衡时最有用）、
+`KB.Swarm.AudioLog <秒>`、`KB.Lobby.{Host,Find,Join,JoinFound,Ready,Start,Solo}`。
+
 ### 别用编辑器 Play 菜单测局域网
 
 两个原因，都会以"看起来像 bug"的方式失败：

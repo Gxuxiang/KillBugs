@@ -969,6 +969,28 @@ void AKBEnemyDirector::ConsoleKillEnemies(const TArray<FString>& Args, UWorld* W
 	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
 }
 
+void AKBEnemyDirector::ConsoleCullSwarm(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AKBEnemyDirector> It(World); It; ++It)
+	{
+		const int32 Before = It->GetEnemyCount();
+		It->CullAllRemaining();
+
+		// "removed", not "killed": this path takes the bugs out of the array without a death going
+		// through ApplyDamageToEnemy, and every machine reads a removal as a death - so the
+		// splatter that follows is an artifact of the shortcut rather than a report of anything.
+		UE_LOG(LogKillBugs, Display, TEXT("Swarm culled: %d bug(s) removed"), Before);
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
+}
+
 static FAutoConsoleCommandWithWorldAndArgs KBConsoleSwarmCount(
 	TEXT("KB.Swarm.Count"),
 	TEXT("KB.Swarm.Count <n> - replace the swarm with n placeholder bugs (default 500)."),
@@ -978,3 +1000,10 @@ static FAutoConsoleCommandWithWorldAndArgs KBConsoleSwarmKill(
 	TEXT("KB.Swarm.Kill"),
 	TEXT("KB.Swarm.Kill <n> - kill n random bugs, exercising removal replication."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleKillEnemies));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleSwarmCull(
+	TEXT("KB.Swarm.Cull"),
+	TEXT("KB.Swarm.Cull - remove every bug at once, without killing them one at a time. Faster "
+	     "than KB.Swarm.Kill when the number is large, and the way to clear a field before "
+	     "testing something other than the swarm."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleCullSwarm));

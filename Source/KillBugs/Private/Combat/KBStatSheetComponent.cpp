@@ -4,6 +4,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "KBConsoleVariables.h"
 #include "KBGameSettings.h"
 #include "Net/UnrealNetwork.h"
 
@@ -51,6 +52,14 @@ float UKBStatSheetComponent::GetHealthFraction() const
 float UKBStatSheetComponent::ApplyDamage(float Damage)
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority() || Damage <= 0.f)
+	{
+		return 0.f;
+	}
+
+	// KB.Player.God - testing switch, off by default. Returning zero rather than absorbing the
+	// hit is deliberate: everything downstream reads the return value as "how much actually
+	// landed", so a shielded hit must look like a miss rather than like damage that was survived.
+	if (CVarKBPlayerGod.GetValueOnGameThread() != 0)
 	{
 		return 0.f;
 	}

@@ -151,6 +151,7 @@ public:
 	// FOutputDevice parameter, so results are reported through UE_LOG instead.
 	static void ConsoleSetSwarmCount(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleKillEnemies(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleCullSwarm(const TArray<FString>& Args, UWorld* World);
 
 protected:
 	/** The whole swarm. One property on one always-relevant actor. */

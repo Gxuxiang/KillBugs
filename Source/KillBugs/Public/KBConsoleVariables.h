@@ -31,3 +31,18 @@ extern KILLBUGS_API TAutoConsoleVariable<float> CVarKBSwarmPerfLog;
  * Usage: KB.Swarm.AudioLog 1
  */
 extern KILLBUGS_API TAutoConsoleVariable<float> CVarKBSwarmAudioLog;
+
+/**
+ * Testing switch: the player takes no damage at all.
+ *
+ * Usage: KB.Player.God 1
+ *
+ * A cvar rather than a UKBGameSettings entry on purpose. Everything in the settings is a design
+ * knob - a value somebody chose - and this is not one; it is a tool for getting to the part of a
+ * run you actually want to look at. Cvars are also the only debug switch this project exposes
+ * that can be flipped mid-run from the console, which is the whole point of it.
+ *
+ * It is checked in UKBStatSheetComponent::ApplyDamage, which is the single funnel every source of
+ * player damage already goes through - contact bites, and whatever lands later.
+ */
+extern KILLBUGS_API TAutoConsoleVariable<int32> CVarKBPlayerGod;
