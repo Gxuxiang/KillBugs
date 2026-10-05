@@ -7,9 +7,13 @@
 #include "Combat/KBStatSheetComponent.h"
 #include "Combat/KBWeaponInventoryComponent.h"
 #include "Core/KBPlayerState.h"
+#include "Containers/Ticker.h"
 #include "Data/KBCardDefinition.h"
 #include "Data/KBContentSubsystem.h"
+#include "EngineUtils.h"
+#include "Extraction/KBExtractionZone.h"
 #include "GameFramework/Pawn.h"
+#include "Interaction/KBChannelComponent.h"
 #include "KillBugs.h"
 #include "KBGameSettings.h"
 #include "Net/KBSessionSubsystem.h"
@@ -29,6 +33,7 @@ AKBGameMode::AKBGameMode()
 
 	EnemyDirectorClass = AKBEnemyDirector::StaticClass();
 	ProjectileDirectorClass = AKBProjectileDirector::StaticClass();
+	ExtractionZoneClass = AKBExtractionZone::StaticClass();
 	HUDClass = AKBHud::StaticClass();
 
 	// Must be set here, not in BeginPlay: tick functions are registered during actor
@@ -63,6 +68,26 @@ void AKBGameMode::BeginPlay()
 			ProjectileDirectorClass, FTransform::Identity, SpawnParams);
 	}
 
+	// The extraction zone exists from the start but is inactive: it is opened and closed on the
+	// wave schedule, and it teleports between appearances rather than being spawned per attempt.
+	if (ExtractionZoneClass)
+	{
+		ExtractionZone = GetWorld()->SpawnActor<AKBExtractionZone>(
+			ExtractionZoneClass, FTransform::Identity, SpawnParams);
+
+		if (ExtractionZone && ExtractionZone->GetChannel())
+		{
+			// Bound ONCE. AddDynamic does not de-duplicate, so rebinding per attempt would stack
+			// handlers and a single completion would end the run several times over.
+			ExtractionZone->GetChannel()->OnChannelComplete.AddDynamic(
+				this, &AKBGameMode::HandleExtractionComplete);
+			ExtractionZone->OnExtractionWindowExpired.AddDynamic(
+				this, &AKBGameMode::HandleExtractionWindowExpired);
+			ExtractionZone->OnExtractionStarted.AddDynamic(
+				this, &AKBGameMode::HandleExtractionStarted);
+		}
+	}
+
 	AKBGameState* RunState = GetGameState<AKBGameState>();
 	if (!RunState)
 	{
@@ -83,6 +108,10 @@ void AKBGameMode::BeginPlay()
 		GetWorld()->GetTimeSeconds() + KBSettings().WarmupSeconds);
 	UE_LOG(LogKillBugs, Display, TEXT("Run started: warmup %.0fs, then waves of %.0fs"),
 		KBSettings().WarmupSeconds, KBSettings().WaveSeconds);
+
+	// The setting is the wave number the PLAYER sees; the schedule is kept in internal wave
+	// indices, which are displayed as +1 everywhere else. Converted once, here.
+	ScheduleExtractionForWave(KBSettings().ExtractionFirstWave - 1);
 }
 
 void AKBGameMode::Tick(float DeltaSeconds)
@@ -144,8 +173,24 @@ void AKBGameMode::Tick(float DeltaSeconds)
 		break;
 
 	case EKBWavePhase::Explore:
-		// A trickle only. The real content of this phase is whatever survived the wave.
-		TickSpawning(DeltaSeconds, KBSettings().ExploreAmbientSpawnRate);
+		// Normally a trickle - the real content of this phase is whatever survived the wave.
+		//
+		// The extraction flood is tied to the TEAM HOLDING THE CIRCLE, not to the zone merely
+		// existing. That is deliberate and it was learned the hard way: with the flood on from the
+		// moment the ring appeared, the hardest part became walking to it, and the zone spawns as
+		// far from the team as the map allows. Tying it to the hold means the approach is an
+		// ordinary explore, the wave answers the moment the players commit, and stepping back out
+		// is a real way to regroup - at the cost of the open window, which resumes draining.
+		if (ExtractionZone && ExtractionZone->IsZoneOpen()
+			&& ExtractionZone->GetChannel() && ExtractionZone->GetChannel()->IsAdvancing())
+		{
+			TickSpawning(DeltaSeconds, KBSettings().ExtractionSpawnRate, KBSettings().ExtractionAliveCap);
+		}
+		else
+		{
+			TickSpawning(DeltaSeconds, KBSettings().ExploreAmbientSpawnRate);
+		}
+
 		if (Now >= RunState->GetPhaseEndServerTime())
 		{
 			// Draft AFTER exploring, so the choice is made knowing what the leftovers cost
@@ -320,13 +365,456 @@ void AKBGameMode::BeginExplore()
 	// Explore is to clear the leftovers AND have time left to search.
 	EnemyDirector->SetEnemyScaling(KBSettings().ExploreEnemyDamageTakenScale, KBSettings().ExploreEnemySpeedScale);
 
+	// An extraction wave's Explore phase has to last the whole episode. The two clocks never run
+	// at once, so the episode is at most window + progress; sizing the phase to fit it here is
+	// what keeps it from straddling a boundary. Otherwise the phase would flip to the card draft
+	// with the team still holding the circle - the draft would appear mid-hold, and its input lock
+	// would land right when the gate needs everybody to keep still.
+	const bool bExtractionWave = RunState->GetWaveIndex() == RunState->GetNextExtractionWaveIndex();
+
+	float ExploreDuration = KBSettings().ExploreSeconds;
+	if (bExtractionWave)
+	{
+		const float EpisodeLength = KBSettings().ExtractionOpenWindowSeconds
+			+ KBSettings().ExtractionSeconds
+			+ KBSettings().ExtractionPhaseTailSeconds;
+
+		ExploreDuration = FMath::Max(ExploreDuration, EpisodeLength);
+	}
+
 	RunState->SetWavePhaseServer(EKBWavePhase::Explore,
-		GetWorld()->GetTimeSeconds() + KBSettings().ExploreSeconds);
+		GetWorld()->GetTimeSeconds() + ExploreDuration);
 
 	UE_LOG(LogKillBugs, Display,
 		TEXT("Explore: %.0fs, %d leftover(s) at %.1fx damage taken / %.2fx speed"),
-		KBSettings().ExploreSeconds, EnemyDirector->GetEnemyCount(),
+		ExploreDuration, EnemyDirector->GetEnemyCount(),
 		KBSettings().ExploreEnemyDamageTakenScale, KBSettings().ExploreEnemySpeedScale);
+
+	if (bExtractionWave)
+	{
+		OpenExtraction();
+	}
+}
+
+// =============================================================================================
+// Extraction
+//
+// The GameMode decides WHEN and WHERE and what a finished attempt means. The zone
+// (AKBExtractionZone) owns the two clocks and reports back through its delegates; it never calls
+// EndRun itself and never looks this class up.
+// =============================================================================================
+
+void AKBGameMode::ScheduleExtractionForWave(int32 WaveIndex)
+{
+	AKBGameState* RunState = GetGameState<AKBGameState>();
+	if (!HasAuthority() || !RunState)
+	{
+		return;
+	}
+
+	RunState->SetNextExtractionWaveIndexServer(WaveIndex);
+
+	if (WaveIndex >= 0)
+	{
+		UE_LOG(LogKillBugs, Display, TEXT("Extraction scheduled: wave %d (%d wave(s) from now)"),
+			WaveIndex + 1, FMath::Max(WaveIndex - RunState->GetWaveIndex(), 0));
+	}
+	else
+	{
+		UE_LOG(LogKillBugs, Display, TEXT("Extraction taken off the schedule"));
+	}
+}
+
+TArray<FVector> AKBGameMode::BuildExtractionCandidates() const
+{
+	// A grid over the arena floor, inset far enough that a whole zone fits inside the walls.
+	//
+	// Deliberately crude: the arena is one flat plane, so every candidate set is equally
+	// arbitrary. It lives in one function precisely so it can be replaced - when the maze exists
+	// this becomes "the centres of the rooms", and SelectExtractionLocation and its callers do not
+	// change at all.
+	const float Half = FMath::Max(
+		KBSettings().ArenaHalfExtent - KBSettings().ExtractionEdgeMargin - KBSettings().ExtractionRadius,
+		100.f);
+
+	constexpr int32 Steps = 5;
+	TArray<FVector> Candidates;
+	Candidates.Reserve(Steps * Steps);
+
+	for (int32 X = 0; X < Steps; ++X)
+	{
+		for (int32 Y = 0; Y < Steps; ++Y)
+		{
+			const float FX = (static_cast<float>(X) / (Steps - 1)) * 2.f - 1.f;
+			const float FY = (static_cast<float>(Y) / (Steps - 1)) * 2.f - 1.f;
+			Candidates.Add(FVector(FX * Half, FY * Half, 0.f));
+		}
+	}
+
+	return Candidates;
+}
+
+FVector AKBGameMode::SelectExtractionLocation() const
+{
+	const TArray<FVector> Candidates = BuildExtractionCandidates();
+	if (Candidates.Num() == 0)
+	{
+		return FVector::ZeroVector;
+	}
+
+	// Where the players actually are, gathered once. Living or downed does not matter: a downed
+	// player is still somewhere the team has to come back for, and a zone next to them is no
+	// journey at all.
+	TArray<FVector, TInlineAllocator<4>> PlayerLocations;
+	if (const AKBGameState* RunState = GetGameState<AKBGameState>())
+	{
+		for (const APlayerState* PS : RunState->PlayerArray)
+		{
+			const AKBPlayerState* KBPS = Cast<AKBPlayerState>(PS);
+			const APawn* Pawn = KBPS ? KBPS->GetPawn() : nullptr;
+			if (Pawn)
+			{
+				PlayerLocations.Add(Pawn->GetActorLocation());
+			}
+		}
+	}
+
+	// Nobody to be far away from. The swarm's focus is itself the arena centre when there are no
+	// living players, which is as good an origin as any.
+	if (PlayerLocations.Num() == 0 && EnemyDirector)
+	{
+		PlayerLocations.Add(EnemyDirector->GetSwarmFocusLocation());
+	}
+
+	// Score = distance to the NEAREST player. Maximising it is exactly "farthest from the team",
+	// and it cannot be gamed by one player standing on a candidate: the others still hold the
+	// score down.
+	int32 BestIndex = 0;
+	float BestScore = -1.f;
+
+	for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+	{
+		float Nearest = TNumericLimits<float>::Max();
+		for (const FVector& PlayerLocation : PlayerLocations)
+		{
+			Nearest = FMath::Min(Nearest, FVector::Dist2D(Candidates[Index], PlayerLocation));
+		}
+
+		if (Nearest > BestScore)
+		{
+			BestScore = Nearest;
+			BestIndex = Index;
+		}
+	}
+
+	return Candidates[BestIndex];
+}
+
+void AKBGameMode::OpenExtraction()
+{
+	if (!HasAuthority() || !ExtractionZone || !EnemyDirector)
+	{
+		return;
+	}
+
+	const FVector Location = SelectExtractionLocation();
+
+	// Nothing else happens here on purpose. Opening the zone is not an event the swarm reacts to:
+	// the answer is to the team committing, which arrives later as OnExtractionStarted. This is
+	// what keeps the walk there free of a flood the team has not yet earned.
+	ExtractionZone->OpenZone(Location, KBSettings().ExtractionOpenWindowSeconds,
+		KBSettings().ExtractionSeconds, KBSettings().ExtractionRadius);
+}
+
+void AKBGameMode::HandleExtractionStarted()
+{
+	// The players are all inside and the countdown is running. This is the moment the design
+	// answers, and it is a moment rather than a condition: a wave arrives at once, and the
+	// sustained pressure is the spawn rate the Explore branch switches to while the gate holds.
+	if (!HasAuthority() || !EnemyDirector)
+	{
+		return;
+	}
+
+	if (KBSettings().ExtractionOpeningBurst > 0)
+	{
+		EnemyDirector->SpawnBatchOffscreen(KBSettings().ExtractionOpeningBurst,
+			KBSettings().MinSpawnDistance, KBSettings().MaxSpawnDistance);
+
+		UE_LOG(LogKillBugs, Display, TEXT("Extraction started: %d bugs incoming, then %.0f/s"),
+			KBSettings().ExtractionOpeningBurst, KBSettings().ExtractionSpawnRate);
+	}
+}
+
+void AKBGameMode::HandleExtractionComplete()
+{
+	// Extraction is the other half of "a run ended", and it enters the same funnel as a wipe so
+	// both produce the same summary and the same trip home. EndRun latches the result, so a wipe
+	// landing in this same frame cannot overwrite it with the bad news.
+	UE_LOG(LogKillBugs, Display, TEXT("Extraction succeeded - ending the run"));
+	EndRun(EKBRunResult::Extracted);
+}
+
+void AKBGameMode::HandleExtractionWindowExpired()
+{
+	// NOT an ending. The attempt failed: the zone is closed already, the run carries on, and the
+	// next opportunity is one interval away.
+	AKBGameState* RunState = GetGameState<AKBGameState>();
+	if (!RunState)
+	{
+		return;
+	}
+
+	// Nothing to undo: the enemy scaling was never touched for the extraction, and the spawn rate
+	// falls back on its own the moment the gate closes, because it is keyed off the hold.
+	ScheduleExtractionForWave(RunState->GetWaveIndex() + FMath::Max(KBSettings().ExtractionWaveInterval, 1));
+}
+
+// ---- Headless test entry points ------------------------------------------------------------
+//
+// Registered below as KB.Extract.*. Static members rather than free functions because they need
+// the private schedule and the zone pointer, and because this is how AKBEnemyDirector exposes its
+// own console commands.
+
+namespace KBExtractCommands
+{
+	AKBGameMode* ResolveGameMode(UWorld* World)
+	{
+		return World ? World->GetAuthGameMode<AKBGameMode>() : nullptr;
+	}
+
+	void MoveEveryPlayer(UWorld* World, const FVector& Target)
+	{
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			APawn* Pawn = It->Get() ? It->Get()->GetPawn() : nullptr;
+			if (!Pawn)
+			{
+				continue;
+			}
+
+			Pawn->SetActorLocation(Target, false, nullptr, ETeleportType::TeleportPhysics);
+			UE_LOG(LogKillBugs, Display, TEXT("Extract: moved %s to (%.0f, %.0f)"),
+				*GetNameSafe(Pawn), Target.X, Target.Y);
+		}
+	}
+
+	AKBExtractionZone* FindZone(UWorld* World)
+	{
+		for (TActorIterator<AKBExtractionZone> It(World); It; ++It)
+		{
+			return *It;
+		}
+
+		return nullptr;
+	}
+
+	/**
+	 * Walks the whole state machine on a timer, logging what each step is supposed to prove.
+	 *
+	 * -ExecCmds fire once, in a single frame, so a sequence that needs "and then the player steps
+	 * out for a second" cannot be expressed as a command line. This is the same problem
+	 * KBLobbyGameMode's waiter solves for the lobby, and the same answer: a ticker.
+	 *
+	 * It runs during Warmup on purpose. Nothing spawns before the first card draft, so the swarm
+	 * cannot kill the subject mid-test and turn an extraction into a wipe - the point here is the
+	 * zone's two clocks, not surviving them.
+	 */
+	struct FSelfTest
+	{
+		TWeakObjectPtr<UWorld> World;
+		float Elapsed = 0.f;
+		int32 Step = 0;
+
+		bool Advance(float DeltaSeconds)
+		{
+			Elapsed += DeltaSeconds;
+
+			UWorld* LiveWorld = World.Get();
+			AKBExtractionZone* Zone = LiveWorld ? FindZone(LiveWorld) : nullptr;
+			if (!Zone)
+			{
+				UE_LOG(LogKillBugs, Warning, TEXT("Extract.SelfTest: the zone went away"));
+				return false;
+			}
+
+			switch (Step)
+			{
+			case 0:
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Extract.SelfTest 1/6: opening 3000 units away (window 4s) - the window must DRAIN and expire"));
+				Zone->OpenZone(FVector(3000.f, 0.f, 0.f), 4.f, 3.f, KBSettings().ExtractionRadius);
+				Step = 1;
+				break;
+
+			case 1:
+				if (Elapsed >= 5.f)
+				{
+					UE_LOG(LogKillBugs, Display,
+						TEXT("Extract.SelfTest 2/6: the window must be gone - zone CLOSED and the run STILL GOING"));
+					Step = 2;
+				}
+				break;
+
+			case 2:
+				if (Elapsed >= 6.f)
+				{
+					UE_LOG(LogKillBugs, Display,
+						TEXT("Extract.SelfTest 3/6: reopening under the team (window 20s, progress 3s) - must FREEZE, then progress"));
+					Zone->OpenZone(FVector(0.f, 0.f, 0.f), 20.f, 3.f, KBSettings().ExtractionRadius);
+					Step = 3;
+				}
+				break;
+
+			case 3:
+				if (Elapsed >= 7.5f)
+				{
+					UE_LOG(LogKillBugs, Display,
+						TEXT("Extract.SelfTest 4/6: scattering the team - progress must be HELD, the window RESUMED"));
+					MoveEveryPlayer(LiveWorld, FVector(0.f, 3000.f, 200.f));
+					Step = 4;
+				}
+				break;
+
+			case 4:
+				if (Elapsed >= 9.f)
+				{
+					UE_LOG(LogKillBugs, Display,
+						TEXT("Extract.SelfTest 5/6: gathering back - progress must resume from where it stopped and finish"));
+					MoveEveryPlayer(LiveWorld, Zone->GetZoneCentre());
+					Step = 5;
+				}
+				break;
+
+			case 5:
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Extract.SelfTest 6/6: done - the run should end itself with 'extracted'"));
+				return false;
+
+			default:
+				return false;
+			}
+
+			return true;
+		}
+	};
+}
+
+void AKBGameMode::ConsoleExtractSelfTest(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	TSharedPtr<KBExtractCommands::FSelfTest> Test = MakeShared<KBExtractCommands::FSelfTest>();
+	Test->World = World;
+
+	UE_LOG(LogKillBugs, Display, TEXT("Extract.SelfTest: started"));
+
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([Test](float DeltaSeconds) -> bool
+		{
+			return Test->Advance(DeltaSeconds);
+		}));
+}
+
+void AKBGameMode::ConsoleExtractOpenNow(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	if (!Mode || !Mode->ExtractionZone)
+	{
+		UE_LOG(LogKillBugs, Warning, TEXT("Extract.OpenNow: no extraction zone in this world"));
+		return;
+	}
+
+	auto ArgOrDefault = [&Args](int32 Index, float Fallback)
+	{
+		return Args.IsValidIndex(Index) ? FCString::Atof(*Args[Index]) : Fallback;
+	};
+
+	const bool bExplicitLocation = Args.Num() >= 2;
+	const FVector Location = bExplicitLocation
+		? FVector(ArgOrDefault(0, 0.f), ArgOrDefault(1, 0.f), 0.f)
+		: Mode->SelectExtractionLocation();
+
+	// The overrides exist so a test does not have to sit through the real 60 + 30 seconds.
+	Mode->ExtractionZone->OpenZone(Location,
+		ArgOrDefault(2, KBSettings().ExtractionOpenWindowSeconds),
+		ArgOrDefault(3, KBSettings().ExtractionSeconds),
+		KBSettings().ExtractionRadius);
+}
+
+void AKBGameMode::ConsoleExtractGather(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	if (!Mode || !Mode->ExtractionZone || !Mode->ExtractionZone->IsZoneOpen())
+	{
+		UE_LOG(LogKillBugs, Warning, TEXT("Extract.Gather: no zone is open"));
+		return;
+	}
+
+	KBExtractCommands::MoveEveryPlayer(World, Mode->ExtractionZone->GetZoneCentre());
+}
+
+void AKBGameMode::ConsoleExtractScatter(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	if (!Mode || !Mode->ExtractionZone)
+	{
+		return;
+	}
+
+	const float Distance = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 1500.f;
+	const FVector Centre = Mode->ExtractionZone->GetZoneCentre();
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		APawn* Pawn = It->Get() ? It->Get()->GetPawn() : nullptr;
+		if (!Pawn)
+		{
+			continue;
+		}
+
+		// Straight out from the centre, so the gate closes without anybody leaving the arena.
+		FVector Away = Pawn->GetActorLocation() - Centre;
+		Away.Z = 0.f;
+		FVector Direction = Away.GetSafeNormal();
+		if (Direction.IsNearlyZero())
+		{
+			Direction = FVector(1.f, 0.f, 0.f);
+		}
+
+		const FVector Target = Centre + Direction * Distance;
+		Pawn->SetActorLocation(Target, false, nullptr, ETeleportType::TeleportPhysics);
+		UE_LOG(LogKillBugs, Display, TEXT("Extract: moved %s to (%.0f, %.0f)"), *GetNameSafe(Pawn),
+			Target.X, Target.Y);
+	}
+}
+
+void AKBGameMode::ConsoleExtractFail(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	if (!Mode || !Mode->ExtractionZone)
+	{
+		return;
+	}
+
+	// Exercises the failure path without waiting out the window.
+	Mode->ExtractionZone->CloseZone(true);
+}
+
+void AKBGameMode::ConsoleExtractSchedule(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	AKBGameState* RunState = World ? World->GetGameState<AKBGameState>() : nullptr;
+	if (!Mode || !RunState)
+	{
+		return;
+	}
+
+	const int32 WavesFromNow = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 1;
+	Mode->ScheduleExtractionForWave(RunState->GetWaveIndex() + WavesFromNow);
 }
 
 void AKBGameMode::BeginCardDraft(int32 ForWaveIndex)
@@ -545,7 +1033,7 @@ void AKBGameMode::ApplyCardEffect(AKBPlayerState* PlayerState, const UKBCardDefi
 		PlayerState->GetKBPlayerIndex(), *Card.Title.ToString());
 }
 
-void AKBGameMode::TickSpawning(float DeltaSeconds, float Rate)
+void AKBGameMode::TickSpawning(float DeltaSeconds, float Rate, int32 MaxAliveOverride)
 {
 	if (!EnemyDirector || Rate <= 0.f)
 	{
@@ -560,7 +1048,12 @@ void AKBGameMode::TickSpawning(float DeltaSeconds, float Rate)
 		return;
 	}
 
-	if (EnemyDirector->GetEnemyCount() >= KBSettings().MaxAliveDuringWave)
+	// Extraction raises the ceiling as well as the rate: at the normal wave cap the flood would
+	// stall the moment it got going. The director clamps everything against MaxEnemies regardless,
+	// so a too-high value here is harmless rather than an overrun.
+	const int32 MaxAlive = MaxAliveOverride > 0 ? MaxAliveOverride : KBSettings().MaxAliveDuringWave;
+
+	if (EnemyDirector->GetEnemyCount() >= MaxAlive)
 	{
 		// At the ceiling. Drop the accumulated credit rather than banking it, or the moment a
 		// player kills one bug a whole backlog would land at once.
@@ -627,3 +1120,46 @@ void AKBGameMode::Logout(AController* Exiting)
 
 	Super::Logout(Exiting);
 }
+
+// ---- KB.Extract.* ----------------------------------------------------------------------------
+//
+// The command-line equivalent of what a player does with their feet, following the KB.Lobby.*
+// precedent: a headless process has no HUD and no input, so the only way to exercise extraction
+// is to drive it the same way the buttons drive the lobby.
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractOpenNow(
+	TEXT("KB.Extract.OpenNow"),
+	TEXT("KB.Extract.OpenNow [x] [y] [windowSeconds] [progressSeconds] - open the zone now. "
+	     "Without x/y it uses the same location the schedule would pick. The time overrides exist "
+	     "so a test need not sit through the real window and hold."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractOpenNow));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractGather(
+	TEXT("KB.Extract.Gather"),
+	TEXT("KB.Extract.Gather - teleport every player onto the zone centre, satisfying the gate."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractGather));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractScatter(
+	TEXT("KB.Extract.Scatter"),
+	TEXT("KB.Extract.Scatter [distance] - move every player that far out from the zone centre "
+	     "(default 1500), closing the gate."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractScatter));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractFail(
+	TEXT("KB.Extract.Fail"),
+	TEXT("KB.Extract.Fail - expire the zone now, exercising the failure path without the wait. "
+	     "The run must CONTINUE."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractFail));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractSchedule(
+	TEXT("KB.Extract.Schedule"),
+	TEXT("KB.Extract.Schedule [wavesFromNow] - put the zone on the schedule (default: next wave)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractSchedule));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractSelfTest(
+	TEXT("KB.Extract.SelfTest"),
+	TEXT("KB.Extract.SelfTest - walk the whole extraction state machine on a timer: open far and "
+	     "let the window expire, reopen under the team and watch it freeze and fill, scatter to "
+	     "pause it, gather to finish. Run it during warmup. Read the log - each step says what it "
+	     "is supposed to prove."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleExtractSelfTest));

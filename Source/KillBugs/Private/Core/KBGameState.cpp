@@ -17,6 +17,17 @@ void AKBGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 	DOREPLIFETIME(AKBGameState, PhaseStartServerTime);
 	DOREPLIFETIME(AKBGameState, Timings);
 	DOREPLIFETIME(AKBGameState, RunResult);
+	DOREPLIFETIME(AKBGameState, NextExtractionWaveIndex);
+}
+
+void AKBGameState::SetNextExtractionWaveIndexServer(int32 InWaveIndex)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	NextExtractionWaveIndex = InWaveIndex;
 }
 
 void AKBGameState::SetRunResultServer(EKBRunResult Result)

@@ -6,6 +6,7 @@
 #include "KBGameMode.generated.h"
 
 class AKBEnemyDirector;
+class AKBExtractionZone;
 
 /**
  * Server-only authority for the run: wave scheduling, card rolling, rewards, respawn and
@@ -60,6 +61,18 @@ public:
 	/** Latches the first ReturnToLobby; see the note there. */
 	bool bReturningToLobby = false;
 
+	// ---- Headless test entry points ------------------------------------------------------
+	//
+	// A headless run draws no HUD and cannot walk anywhere, so the extraction has to be drivable
+	// and observable from the console. Registered as KB.Extract.* at the bottom of the .cpp.
+
+	static void ConsoleExtractOpenNow(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleExtractGather(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleExtractScatter(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleExtractFail(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleExtractSchedule(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleExtractSelfTest(const TArray<FString>& Args, UWorld* World);
+
 protected:
 	/** Monotonic counter feeding AKBPlayerState::KBPlayerIndex. */
 	int32 NextPlayerIndex = 0;
@@ -70,8 +83,14 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Combat")
 	TSubclassOf<class AKBProjectileDirector> ProjectileDirectorClass;
 
+	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Extraction")
+	TSubclassOf<AKBExtractionZone> ExtractionZoneClass;
+
 	UPROPERTY(BlueprintReadOnly, Category = "KillBugs|Swarm")
 	TObjectPtr<AKBEnemyDirector> EnemyDirector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "KillBugs|Extraction")
+	TObjectPtr<AKBExtractionZone> ExtractionZone;
 
 	// ---- Tuning --------------------------------------------------------------------------
 	//
@@ -98,7 +117,36 @@ private:
 	void BeginExplore();
 
 	/** Spawns at Rate bugs per second, held back by MaxAliveDuringWave. */
-	void TickSpawning(float DeltaSeconds, float Rate);
+	void TickSpawning(float DeltaSeconds, float Rate, int32 MaxAliveOverride = -1);
+
+	// ---- Extraction ----------------------------------------------------------------------
+	//
+	// The GameMode owns WHEN and WHERE; AKBExtractionZone owns the two clocks. The zone never
+	// calls EndRun or looks the GameMode up - it broadcasts, and these handlers decide.
+
+	/** Opens the zone at the scheduled wave's Explore phase and steps the pressure up. */
+	void OpenExtraction();
+
+	/** The team held the circle: the run ends the same way a wipe does, from the same funnel. */
+	UFUNCTION()
+	void HandleExtractionComplete();
+
+	/** The open window ran out. The run CONTINUES; the zone is only put back on the schedule. */
+	UFUNCTION()
+	void HandleExtractionWindowExpired();
+
+	/** The team committed - everybody is in and the countdown is running. Answers with a wave. */
+	UFUNCTION()
+	void HandleExtractionStarted();
+
+	/** Server-only. Sets which wave the zone opens in; -1 disables it for the rest of the run. */
+	void ScheduleExtractionForWave(int32 WaveIndex);
+
+	/** Where the zone may appear. Replace THIS when rooms exist; nothing else needs to change. */
+	TArray<FVector> BuildExtractionCandidates() const;
+
+	/** The candidate farthest from the nearest player, so it is never a free walk away. */
+	FVector SelectExtractionLocation() const;
 
 	/** Opens the draft for the given wave. See the phase order in EKBWavePhase. */
 	void BeginCardDraft(int32 ForWaveIndex);

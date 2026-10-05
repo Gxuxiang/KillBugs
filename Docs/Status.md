@@ -1,6 +1,6 @@
 # KillBugs 状态与交接
 
-> 最后更新：2026-10-04
+> 最后更新：2026-10-05
 >
 > 这份文档的目的是**抗遗忘**：代码能说明"现在是什么样"，但说不清"为什么是这样、哪里验证过、
 > 哪些坑踩过"。那些东西只存在于当时的对话里，所以固化在这里。
@@ -37,6 +37,7 @@
 | 局末结算 | `AKBGameMode::EndRun` + `AKBGameState::RunResult` | 一局**唯一的出口**：团灭（以后撤离成功走同一条路）→ 结算界面 → 回大厅 |
 | 交互原语（读条/区域） | `UKBChannelComponent` | "站在区域内 + 条件持续满足 + 读条 N 秒"。撤离、救援、开门共用；暂停/重置是每处自己选的 |
 | 救援 | `AKBCharacter` 上的 `UKBChannelComponent` | 倒地者投影出救助圈，队友进圈读条；**离开则重新计时**；救起回复一半血。圈和进度由 `AKBHud::DrawRescueCircles` 画在地面上 |
+| **撤离** | `AKBExtractionZone` + 复用的 `UKBChannelComponent` | **两个互斥的钟**：开启时间只在「不是全员在圈内」时走，走完 = 撤离失败（关闭、**这一局继续**、过 N 波再来）；撤离计时只在全员在圈内时走（同时把开启时间冻住），走满 = `EndRun(Extracted)`。每 N 波出现在**离玩家最远的候选点**，出现前有「N 波后出现」预告，出画时有屏幕边缘箭头。**虫潮挂在读条上**：开点无压力，全员进圈那一刻来一波（每点一次）+ 维持 12/秒；有人出圈就停 |
 | 属性 | `UKBStatSheetComponent` | 挂在 Pawn 上，不是 PlayerState |
 | 音频 | `UKBAudioSubsystem` + `UKBSwarmAudioComponent` | 音乐床随复制的阶段交叉淡入；UI 音效；**虫子移动音按最近 N 只定位播放** |
 | 战斗 UI | `AKBHud` | **Canvas 即时模式**（不是 UMG）：时间轴、血条、状态读数、选卡面板、左下角队伍面板 |
@@ -45,6 +46,136 @@
 
 **为什么 UI 用 Canvas 不用 UMG**：整个游戏只有大厅和战斗两块界面，搭控件树的开销大于它带来的好处。
 真要换成 UMG，读的数据都在复制的 PlayerState/GameState 上，不需要动玩法代码。
+
+---
+
+## 本轮（2026-10-05）做的：撤离点（阶段 2 的第一刀）
+
+一局在此之前**只有一个出口**（团灭）。加上撤离之后一局才有"赢"这个结局，后面「搜到的东西
+能带走」也才有意义——所以它排在搜和存前面。
+
+### 规则：两个互斥的钟
+
+撤离点有**开启时间**和**撤离计时**，任何时刻只有一个在走：
+
+- 开启时间只在「不是全员存活且都在圈内」时走。走完 = **撤离失败**：撤离点关闭、**这一局继续**、
+  过 N 波再出现。
+- 撤离计时只在全员都在圈里时走，同时把开启时间**冻住**。走满 = **撤离成功**，`EndRun(Extracted)`。
+- 中途有人离开 → 读条暂停（**保留进度**），开启时间继续。
+
+**为什么必须有开启时间**：`UKBChannelComponent` 的 `Pause` 策略在没有截止时间时，"离开圈"的成本
+**等于零**——队伍可以一直在圈外耗着，想什么时候进去就什么时候进去。开启时间是那个一直在走的
+东西，它给了"不在圈里"一个价格。设计文档里对应的段落见 [`GameDesign.md`](GameDesign.md)。
+
+### 双钟没有做进 `UKBChannelComponent`，这是本轮最值得记的决定
+
+营救和将来的开门**都没有窗口**。把窗口做进通道组件，等于让三个使用者里的两个带一个永远关闭的
+开关——抽象就从"共用的那部分"变成"其中一个使用者的特性"。而且窗口到期需要**第二条停用路径**
+（现在 `Advance` 只在 `Progress >= 1` 时停用自己，`KBChannelComponent.cpp:240-252`），
+"到期意味着什么"这个决定**无论放哪层都得传到 GameMode**，所以扩展它并不能省掉监听者。
+营救那条链是实测通过的，不碰它最省事也最安全。
+
+分区因此是：**GameMode 管"何时、何地、之后怎么办"；`AKBExtractionZone` 管两个钟。**
+撤离点只广播（`FKBOnExtractionWindowExpired` + 通道自己的 `OnChannelComplete`），
+不调 `EndRun`、也不去找 GameMode——和 `AKBEnemyDirector` 一样解耦。
+
+**闸门只有一处定义**：撤离点的 `Tick` 调 `Channel->EvaluateGate()`，不自己拿距离再写一遍
+（`Dist2D` 和"倒地不算在圈内"都只在 `IsPlayerInsideAndCounts` 里有一份）。
+
+### 几个实现上的点
+
+- **Explore 阶段会被撑长**：两个钟互斥，所以整段撤离最多 `开启时间 + 撤离计时` 秒。
+  `BeginExplore` 在撤离波把这阶段的时长取成 `max(ExploreSeconds, 窗口 + 读条 + 余量)`，
+  整段撤离就不会跨到下一个阶段去。副作用：HUD 时间轴的 Explore 段仍按 `Timings.Explore` 排版，
+  填充会先满、数字继续走。纯观感，先记着。
+- **候选点**：竞技场内缩进后的 5×5 网格，取「到最近玩家距离」最大的那个。做成一个
+  `BuildExtractionCandidates()` 就是为了将来换成"房间中心"时只改这一个函数。
+  地图脚本**不用重跑**（所以也不用往 `OWNER_ACTOR_CLASSES` 里加类）。
+- **撤离期间的虫潮**用的是现有速率累积器，只是把速率和场上上限换了
+  （`TickSpawning` 多了个 `MaxAliveOverride`），并撤掉了 Explore 对虫子的软化
+  （3× 受伤 / 0.6× 速度会让守卫战变成散步）。没有给导演加新 API。
+- **`Radius` 不复制**：通道的 `Radius` 是 `EditDefaultsOnly` 且不在复制列表里，
+  所以撤离点自己复制一个 `ZoneRadius`。客户端的圈用 `GetZoneRadius()` 画，不依赖那个。
+
+### 无头验证：`KB.Extract.SelfTest`
+
+`-ExecCmds` 只在**同一帧**执行一次，而"玩家走出去一秒再回来"这种序列用命令行表达不了——
+和 `KBLobbyGameMode` 的 `KBWaitThen` 是同一个问题，用了同一个答案（`FTSTicker`）。
+
+`KB.Extract.SelfTest` 在一次运行里走完五种情形，**全程在 Warmup 里跑**（第一波选卡之前不刷虫，
+所以不会出现"测试到一半被咬死变成团灭"）。一步一条日志说明这一步要证什么。实测日志：
+
+```
+Extract.SelfTest 1/6: opening 3000 units away (window 4s) - the window must DRAIN and expire
+KBExtractionZone_0: channel ACTIVE (radius 350, 3.0s, gate 2, break 0)
+KBExtractionZone_0:   player 0 at 3000 units (out, downed no)
+Extraction zone opened at (3000, 0) radius 350, window 4.0s, progress 3.0s
+KBExtractionZone_0: channel idle (...)
+Extraction window expired with progress 0.00 - zone closed, run continues   <- 没有 Run over
+Extraction scheduled: wave 4 (3 wave(s) from now)
+...
+Extraction window frozen (all players inside) at 20.0s
+KBExtractionZone_0: gate OPEN (progress 0.00)
+Extraction progress 25% / 50% / 75% (window frozen at 20.0s)
+Extraction window resumed at 20.0s (progress held at 0.80)                  <- 暂停而非重置
+KBExtractionZone_0: gate closed (progress 0.80)
+Extraction window frozen (all players inside) at 17.7s                      <- 圈外这 2.3 秒窗口在走
+KBExtractionZone_0: gate OPEN (progress 0.80)                               <- 进度还是 0.80
+KBExtractionZone_0: channel complete after 3.0s
+Extraction succeeded - ending the run
+Run over (extracted) at wave 1 - returning to the lobby in 12s
+  summary for player 0: level 1 | xp 0 | gold 0
+Run done: travelling back to the lobby (solo)
+Lobby: ... is the host / joined (index 0, 1 player(s))
+```
+
+> **一个不是 bug 的 7.55 秒**：`Run over` 到 `travelling` 之间日志只隔 7.55 秒，而设置是 12 秒。
+> 同一段逻辑在上一轮**窗口化**测试里量到的是 12.012 秒（`Saved/Logs/Client.log`）。
+> 差异来自 `-unattended -nullrhi` 下引擎用固定步长跑、世界时间约为真实时间的 1.6 倍。
+> 代码没变，别去"修"它。
+
+### 落地后实测出来的两个问题（都已修）
+
+**1. 虫潮挂错了时机，两局都撑不到撤离点。**
+
+第一版把「撤离点一开就加压」写死：开点瞬间直接撒 60 只，速率从 Explore 的 0.4/秒 跳到
+22/秒（≈第 12 波），同时把 Explore 对虫子的软化撤掉——玩家实测那一局开点时场上还有 166 只，
+它们当场变硬 3 倍、变快 1.67 倍，而撤离点按设计刷在离队伍最远处，要跑 11905 单位过去。
+
+**这就把"走过去"变成了最难的部分，而设计要的是"守住"。** 而且它本来就不符合最初的写法
+（"**计时期间**出现大规模虫潮"）。改成：
+
+- 虫潮只在**全员进圈读条**时出现（`Channel->IsAdvancing()`），一开点什么都不发生；
+- 那一波爆发挪到"玩家开启撤离"的瞬间，并且**每个撤离点只给一次**（第一次全员进圈时），
+  否则反复进出就能无限刷虫；
+- 速率 22 → 12（≈第 5 波），爆发 60 → 30；
+- 不再动敌人缩放，保持 Explore 的软化。
+
+**2. 接触伤害不看虫子大小。**
+
+判定是「玩家中心到虫子中心 110 厘米」，固定值。按各自的 `BodyRadius` 折算，触发时两具身体
+**看起来**还空着：Runner 48 厘米、Grunt 34 厘米、Brute −9（已经重叠了）。也就是小虫子在明显
+没碰到你的时候就咬，大块头得压在你身上才算。
+
+改成**边到边**，每只虫各算各的：`玩家胶囊半径 + 这只虫的 BodyRadius + ContactGap(15)`。
+`BodyRadius` 本来就管分离、武器命中、影子圈，而且是模型缩放所依据的那个数——接触伤害是唯一
+没跟上它的地方。广相位用最大半径查到，窄相位按各自的半径精确判。
+
+> **改这一处时我自己引入了一个崩溃，值得记下来。** 替换那段代码时把 `ContactScratch.Reset()`
+> 一起删了。这个数组是成员级的暂存缓冲，而 `Grid.QuerySphere` 只**追加**、不清空——于是它跨玩家、
+> 跨帧累积，一旦有虫子死掉、`Sim` 变短，旧下标就越界：`Array index out of bounds: 18 into an
+> array of size 17`，栈顶正是 `AKBEnemyDirector::TickContactDamage`。
+>
+> 教训是**「替换一段代码」比「新增一段代码」危险**：被替换掉的那几行里可能有一行不是这个功能
+> 的一部分，但却是它正确性的前提（这里就是一次 `Reset()`）。这次是自测恰好在有虫子的场景下跑，
+> 才在几分钟内暴露；无头自测在加虫潮之前根本没有虫子，永远不会触发。
+
+### 还没验的（诚实划界）
+
+- **画面**：圆环、两个数字、边缘箭头、预告文字——**没有任何人看过**（`-nullrhi` 不跑 `DrawHUD`）。
+- **排期路径**：第 N 波的 Explore 自动开点、Explore 被撑长，只验到 `Extraction scheduled: wave 3`
+  这一行。真到 Explore 需要角色活着穿过前面那波虫潮，无头下站桩必死，跑不到。
+- **联机**：客户端看不看得到圈和两个数字。数据都在复制列表里，但没人验过。
 
 ---
 
@@ -282,6 +413,14 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 | 救助圈的**视觉**（地上的圈、进度） | ✅ 用户已确认（并修掉了"客户端看不到"—— 见本轮问题 7） |
 | **客户端能听到自己的枪声** | ✅ 用户已确认。日志另有证据：客户端收到 `FireFeedback: CLIENT for slot 1 (DA_Weapon_Shotgun)`，且**每发一条**、间隔与霰弹枪 0.9s 冷却吻合（没有播两遍） |
 | **队友的血条** | ✅ 用户已确认（左下角 `AKBHud::DrawPartyStatus`） |
+| **撤离：整条状态机**（开点 → 窗口耗尽后这局继续 → 全员进圈冻结并读条 → 有人离开进度保留而窗口续走 → 读满撤离成功） | ✅ 实测（无头 `KB.Extract.SelfTest`，一条命令走完五种情形，日志逐条可对，见本轮） |
+| **撤离成功后回大厅** | ✅ 实测（`Run over (extracted)` → summary → `travelling back to the lobby` → 大厅起来） |
+| 撤离的**画面**（地面圆环、两个数字、边缘箭头、预告文字） | ❌ **没有任何人看过**。`-nullrhi` 下 `DrawHUD` 不执行，必须开窗口跑一次 |
+| 撤离的**排期路径**（第 N 波的 Explore 阶段自动开点、Explore 被撑长） | ✅ 实测（用户在窗口里玩到第 3 波：`Explore: 95s`（不是 90）+ `Extraction zone opened at (4550, 4550)`，位置正是离玩家最远的角） |
+| **虫潮时机**（开点无压力 / 进圈才来一波 / 出圈就停） | ✅ 无头实测（`Extraction started: 30 bugs incoming, then 12/s` 只在第一次进圈时出现一次）；**手感未经人验** |
+| **接触伤害按模型大小**（每只虫各算各的） | ⚠️ **逻辑已改、无头跑过不崩，但"贴脸才掉血"的手感没人验过** |
+| 撤离的**联机**（客户端看得到圈和两个数字） | ❌ 未测。数据链路都复制（`ZoneCentre`/`ZoneRadius`/`OpenWindowRemaining` + 通道的 `Progress`/`bAdvancing`），但没人验过 |
+| **退出时的引擎崩溃**（`PurgeAllUObjectsOnExit` → `~FEnumProperty`） | ⚠️ **未解释**。只出现过一次（09:14 那局，7 分钟、开过撤离点），同一天的短会话和昨天同类的长会话都是干净的 `LogExit: Exiting.`。栈全在 `CoreUObject` 里，没有一帧 KillBugs。影响是"关窗时崩"，玩的时候完全正常。见「未决问题」 |
 
 **无头测不到 UI**：`-nullrhi` 下 `DrawHUD` 不执行。能无头证明的只有数据链路和
 `Lobby: click input bound`（绑定存在），画面对不对必须人看。
@@ -443,16 +582,25 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 12. **准备状态不跨换图**（新世界新 GameState）。加入者换图进来要重新按准备 —— 这是对的，
     但如果你希望"沿用上一局的准备"，那需要额外做持久化。
 
+13. **退出时的引擎崩溃，只出现过一次，未解释。** 2026-10-05 那局窗口化测试（玩了约 7 分钟、
+    撤离点开过、人在圈里进出过）关窗时崩在 `PurgeAllUObjectsOnExit` → `~FEnumProperty`，
+    栈**全在 `CoreUObject` 里，没有一帧 KillBugs**。同一天的一次短会话、以及改动前昨天三次
+    同类的长会话，结尾都是干净的 `LogExit: Exiting.`。
+    游戏过程完全正常，只在关窗时崩，所以不影响玩。
+    **要定性的办法**：再复现一次（长会话 + 碰过撤离点 + 正常关窗）。如果复现，就把这一版改动
+    stash 掉、重编、用同样流程跑一次——两次都崩就说明与这个功能无关。
+
 ---
 
 ## 下一步候选
 
-**主线在 [`GameDesign.md`](GameDesign.md) 的路线图里**，当前进度：**阶段 0 已完成**，
-下一个是**阶段 1 —— 交互原语（读条/区域），用救援来验证**。
+**主线在 [`GameDesign.md`](GameDesign.md) 的路线图里**。当前进度：**阶段 0、1 已完成**，
+**阶段 2 的「撤」已完成**，剩下的是「搜」和「存」。
 
-阶段 1 之所以排在搜和撤前面：撤离、救援、开房间是**同一个东西**（站在区域内、条件持续满足、
-读条 N 秒、条件断了就重置），做一次三处复用。救援是验证它最便宜的场景 ——
-现在的"等下一波自动复活"本来就该换掉。
+顺序上先做「存」还是先做「搜」值得想一下：**「存」的地基（金币跨局 + 仓库格式）现在什么都没有**
+（见「未决问题 0」），而「搜」捡到的东西没有地方可放。但仓库里现在只有金币一样东西可存，
+所以两边都说得过去——我倾向先把存档地基补上，因为它同时是「撤离成功 vs 团灭」这个区别
+真正生效的前提。
 
 以下是不在主线上的零散项，有空再收：
 

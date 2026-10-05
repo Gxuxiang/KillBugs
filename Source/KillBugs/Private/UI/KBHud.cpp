@@ -13,6 +13,7 @@
 #include "Components/CapsuleComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "Extraction/KBExtractionZone.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
 #include "Interaction/KBChannelComponent.h"
@@ -136,8 +137,12 @@ void AKBHud::DrawHUD()
 	DrawTimeline();
 	DrawEnemyHealthBars();
 	DrawRescueCircles();
+	DrawExtractionZone();
 	DrawRunReadout();
 	DrawPartyStatus();
+	// Last before the draft panel: the announcement is the lowest-priority thing on screen, and
+	// the cards have to be readable over it.
+	DrawExtractionIndicator();
 	DrawCardDraft();
 }
 
@@ -369,6 +374,279 @@ void AKBHud::DrawRescueCircles()
 		DrawText(Label, LabelColour, CentreProjected.X - LabelWidth * 0.5f,
 			CentreProjected.Y - LabelHeight, Font, 1.1f, false);
 	}
+}
+
+void AKBHud::DrawExtractionZone()
+{
+	const APlayerController* PlayerController = GetOwningPlayerController();
+	UWorld* World = PlayerController ? PlayerController->GetWorld() : nullptr;
+	if (!World || !Canvas)
+	{
+		return;
+	}
+
+	if (!CachedExtractionZone.IsValid())
+	{
+		for (TActorIterator<AKBExtractionZone> It(World); It; ++It)
+		{
+			CachedExtractionZone = *It;
+			break;
+		}
+	}
+
+	const AKBExtractionZone* Zone = CachedExtractionZone.Get();
+	if (!Zone || !Zone->IsZoneOpen())
+	{
+		return;
+	}
+
+	const UKBChannelComponent* Channel = Zone->GetChannel();
+	if (!Channel)
+	{
+		return;
+	}
+
+	// The zone's origin is already on the floor (the GameMode places it at Z = 0), so unlike the
+	// rescue ring there is no capsule to subtract - only the same small lift that keeps the line
+	// off the plane it is painted on.
+	const FVector Centre = Zone->GetZoneCentre() + FVector(0.f, 0.f, 4.f);
+	const float Radius = Zone->GetZoneRadius();
+	const float Progress = Channel->GetProgress();
+	const bool bAdvancing = Channel->IsAdvancing();
+
+	constexpr int32 Segments = 48;
+	TArray<FVector, TInlineAllocator<Segments>> Points;
+	Points.SetNum(Segments);
+
+	bool bAnyProjected = false;
+	for (int32 Index = 0; Index < Segments; ++Index)
+	{
+		const float Angle = 2.f * PI * static_cast<float>(Index) / static_cast<float>(Segments);
+		const FVector Around = Centre + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.f) * Radius;
+		Points[Index] = Project(Around);
+		bAnyProjected |= Points[Index].Z > 0.f;
+	}
+
+	if (!bAnyProjected)
+	{
+		return;
+	}
+
+	// The progress arc is a subset of the ring's own points, so it grows along the ring rather
+	// than drifting off it - the same reason the rescue ring does it this way.
+	const int32 ProgressSegments = FMath::Clamp(FMath::RoundToInt(Progress * Segments), 0, Segments);
+
+	for (int32 Index = 0; Index < Segments; ++Index)
+	{
+		const FVector& A = Points[Index];
+		const FVector& B = Points[(Index + 1) % Segments];
+
+		if (A.Z <= 0.f || B.Z <= 0.f)
+		{
+			continue;
+		}
+
+		// Three states, three colours, because each one asks the player to do something different:
+		// standing in it (cyan, filling), waiting for the rest of the team (amber, draining), and
+		// already done (the channel deactivates, so this is unreachable at 100%).
+		FLinearColor Colour;
+		if (Index < ProgressSegments)
+		{
+			Colour = FLinearColor(0.32f, 0.78f, 0.92f, 0.95f);
+		}
+		else if (bAdvancing)
+		{
+			Colour = FLinearColor(0.55f, 0.62f, 0.75f, 0.35f);
+		}
+		else
+		{
+			Colour = FLinearColor(0.86f, 0.68f, 0.28f, 0.45f);
+		}
+
+		DrawLine(A.X, A.Y, B.X, B.Y, Colour, (Index < ProgressSegments) ? 4.f : 2.f);
+	}
+
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font)
+	{
+		return;
+	}
+
+	const FVector CentreProjected = Project(Centre);
+	if (CentreProjected.Z <= 0.f)
+	{
+		return;
+	}
+
+	FString Label;
+	FLinearColor LabelColour;
+
+	if (bAdvancing)
+	{
+		Label = FString::Printf(TEXT("撤离中 %d%%"), FMath::RoundToInt(Progress * 100.f));
+		LabelColour = FLinearColor(0.32f, 0.78f, 0.92f, 1.f);
+	}
+	else if (Progress > 0.f)
+	{
+		// The pause wording is the whole reason the progress is drawn separately from the window:
+		// without it, a stalled bar looks like a bug rather than like somebody standing outside.
+		Label = FString::Printf(TEXT("撤离暂停 %d%% —— 等待全员进入"),
+			FMath::RoundToInt(Progress * 100.f));
+		LabelColour = FLinearColor(0.95f, 0.78f, 0.34f, 1.f);
+	}
+	else
+	{
+		Label = TEXT("撤离点已开启 —— 全员进入开始撤离");
+		LabelColour = FLinearColor(0.92f, 0.94f, 0.98f, 1.f);
+	}
+
+	float LabelWidth = 0.f;
+	float LabelHeight = 0.f;
+	GetTextSize(Label, LabelWidth, LabelHeight, Font, 1.15f);
+	DrawText(Label, LabelColour, CentreProjected.X - LabelWidth * 0.5f,
+		CentreProjected.Y - LabelHeight * 1.7f, Font, 1.15f, false);
+
+	// The window countdown, hidden while it is frozen. A number that has stopped moving reads as
+	// a broken number; the "撤离中" wording above already says which clock is running.
+	if (!bAdvancing)
+	{
+		const FString WindowLabel = FString::Printf(TEXT("撤离点剩余 %.0f 秒"),
+			Zone->GetOpenWindowRemaining());
+
+		float WindowWidth = 0.f;
+		float WindowHeight = 0.f;
+		GetTextSize(WindowLabel, WindowWidth, WindowHeight, Font, 1.0f);
+		DrawText(WindowLabel, FLinearColor(0.86f, 0.68f, 0.28f, 1.f),
+			CentreProjected.X - WindowWidth * 0.5f, CentreProjected.Y + WindowHeight * 0.6f,
+			Font, 1.0f, false);
+	}
+}
+
+void AKBHud::DrawExtractionIndicator()
+{
+	const APlayerController* PlayerController = GetOwningPlayerController();
+	UWorld* World = PlayerController ? PlayerController->GetWorld() : nullptr;
+	if (!World || !Canvas)
+	{
+		return;
+	}
+
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font)
+	{
+		return;
+	}
+
+	if (!CachedExtractionZone.IsValid())
+	{
+		for (TActorIterator<AKBExtractionZone> It(World); It; ++It)
+		{
+			CachedExtractionZone = *It;
+			break;
+		}
+	}
+
+	const AKBExtractionZone* Zone = CachedExtractionZone.Get();
+
+	if (Zone && Zone->IsZoneOpen())
+	{
+		const FVector ZoneCentre = Zone->GetZoneCentre();
+		const FVector Projected = Project(ZoneCentre);
+
+		const bool bOnScreen = Projected.Z > 0.f
+			&& Projected.X >= 0.f && Projected.X <= Canvas->SizeX
+			&& Projected.Y >= 0.f && Projected.Y <= Canvas->SizeY;
+
+		if (bOnScreen)
+		{
+			// The ring is already drawn where the player is looking; an arrow on top of it would
+			// only be in the way.
+			return;
+		}
+
+		// Screen-space direction to the zone, computed from the camera's own axes rather than from
+		// the projection: behind the camera the projected XY is meaningless, and that is exactly
+		// the case an edge arrow exists for.
+		FVector CameraLocation;
+		FRotator CameraRotation;
+		PlayerController->GetPlayerViewPoint(CameraLocation, CameraRotation);
+
+		const FRotationMatrix CameraBasis(CameraRotation);
+		const FVector ToZone = (ZoneCentre - CameraLocation).GetSafeNormal();
+		FVector2D ScreenDirection(
+			FVector::DotProduct(ToZone, CameraBasis.GetUnitAxis(EAxis::Y)),
+			-FVector::DotProduct(ToZone, CameraBasis.GetUnitAxis(EAxis::Z)));
+
+		if (!ScreenDirection.Normalize())
+		{
+			ScreenDirection = FVector2D(0.f, -1.f);
+		}
+
+		const float Margin = 70.f;
+		const FVector2D ScreenCentre(Canvas->SizeX * 0.5f, Canvas->SizeY * 0.5f);
+		const float HalfWidth = FMath::Max(Canvas->SizeX * 0.5f - Margin, 1.f);
+		const float HalfHeight = FMath::Max(Canvas->SizeY * 0.5f - Margin, 1.f);
+
+		// Push the arrow out to whichever screen edge the direction hits first.
+		const float Scale = FMath::Min(
+			HalfWidth / FMath::Max(FMath::Abs(ScreenDirection.X), KINDA_SMALL_NUMBER),
+			HalfHeight / FMath::Max(FMath::Abs(ScreenDirection.Y), KINDA_SMALL_NUMBER));
+
+		const FVector2D Edge = ScreenCentre + ScreenDirection * Scale;
+		const FVector2D Tip = Edge + ScreenDirection * 18.f;
+		const FVector2D Back = Edge - ScreenDirection * 18.f;
+		const FVector2D Side(-ScreenDirection.Y, ScreenDirection.X);
+
+		const FLinearColor ArrowColour(0.32f, 0.78f, 0.92f, 0.95f);
+		DrawLine(Tip.X, Tip.Y, (Back + Side * 13.f).X, (Back + Side * 13.f).Y, ArrowColour, 4.f);
+		DrawLine(Tip.X, Tip.Y, (Back - Side * 13.f).X, (Back - Side * 13.f).Y, ArrowColour, 4.f);
+
+		// Metres, because that is the unit a player thinks in; the world is in centimetres.
+		float DistanceText = 0.f;
+		if (const APawn* Pawn = PlayerController->GetPawn())
+		{
+			DistanceText = FVector::Dist2D(Pawn->GetActorLocation(), ZoneCentre) / 100.f;
+		}
+
+		const FString Label = FString::Printf(TEXT("撤离点 %.0f 米"), DistanceText);
+		float LabelWidth = 0.f;
+		float LabelHeight = 0.f;
+		GetTextSize(Label, LabelWidth, LabelHeight, Font, 1.15f);
+
+		// Pulled back towards the middle of the screen so the text never sits off the edge.
+		const FVector2D LabelPosition = Edge - ScreenDirection * 46.f;
+		DrawText(Label, FLinearColor(0.32f, 0.78f, 0.92f, 1.f),
+			LabelPosition.X - LabelWidth * 0.5f, LabelPosition.Y - LabelHeight * 0.5f,
+			Font, 1.15f, false);
+
+		return;
+	}
+
+	// Not open (yet). If one is on the schedule, say how far off it is. This is the whole defence
+	// against the zone feeling like an ambush: the player is told it is coming, in waves, which is
+	// a unit they can count.
+	const AKBGameState* RunState = World->GetGameState<AKBGameState>();
+	if (!RunState)
+	{
+		return;
+	}
+
+	const int32 WavesAway = RunState->GetNextExtractionWaveIndex() - RunState->GetWaveIndex();
+	if (WavesAway < 1)
+	{
+		return;
+	}
+
+	const FString Label = FString::Printf(TEXT("%d 波后出现撤离点"), WavesAway);
+	float LabelWidth = 0.f;
+	float LabelHeight = 0.f;
+	GetTextSize(Label, LabelWidth, LabelHeight, Font, 1.2f);
+
+	// Under the timeline, centred: out of the way of the readout in the corners, and directly
+	// below the bar that is counting the waves down.
+	DrawText(Label, FLinearColor(0.42f, 0.80f, 0.92f, 1.f),
+		Canvas->SizeX * 0.5f - LabelWidth * 0.5f,
+		TimelineTopMargin + TimelineHeight + 12.f, Font, 1.2f, false);
 }
 
 void AKBHud::DrawRunSummary()

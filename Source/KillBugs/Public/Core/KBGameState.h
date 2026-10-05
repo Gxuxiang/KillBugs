@@ -117,6 +117,19 @@ public:
 	/** Server-only. Set once at run start. */
 	void SetPhaseTimingsServer(const FKBPhaseTimings& InTimings);
 
+	/**
+	 * The wave whose Explore phase the next extraction zone opens in; -1 = none scheduled.
+	 *
+	 * Replicated because the pre-announcement ("N 波后出现撤离点") is a client-facing number, and
+	 * the HUD computes it as NextExtractionWaveIndex - WaveIndex. One source of truth, shared by
+	 * the GameMode's schedule and the HUD's countdown.
+	 */
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Run")
+	int32 GetNextExtractionWaveIndex() const { return NextExtractionWaveIndex; }
+
+	/** Server-only. */
+	void SetNextExtractionWaveIndexServer(int32 InWaveIndex);
+
 	UPROPERTY(BlueprintAssignable, Category = "KillBugs|Run")
 	FKBOnWavePhaseChanged OnWavePhaseChanged;
 
@@ -180,6 +193,9 @@ protected:
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")
 	EKBRunResult RunResult = EKBRunResult::InProgress;
+
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Run")
+	int32 NextExtractionWaveIndex = -1;
 
 	// EnemiesAlive, RunSeed and WaveModifiers are added in Phase 2/4, once the swarm and the
 	// wave definitions exist to populate them.

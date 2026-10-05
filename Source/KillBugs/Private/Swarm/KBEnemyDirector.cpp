@@ -686,6 +686,17 @@ void AKBEnemyDirector::TickContactDamage(float DeltaSeconds)
 		return;
 	}
 
+	// The widest reach any archetype can have, for the broad phase below. Computed once per
+	// cadence rather than per player, and per archetype rather than per bug.
+	float MaxBodyRadius = 0.f;
+	for (const TObjectPtr<UKBEnemyArchetype>& Archetype : Archetypes)
+	{
+		if (Archetype)
+		{
+			MaxBodyRadius = FMath::Max(MaxBodyRadius, Archetype->BodyRadius);
+		}
+	}
+
 	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 	{
 		APlayerController* PlayerController = It->Get();
@@ -709,8 +720,25 @@ void AKBEnemyDirector::TickContactDamage(float DeltaSeconds)
 			continue;
 		}
 
+		// Contact is measured EDGE TO EDGE, and the bug's edge is its BodyRadius - the same number
+		// that already drives separation, weapon hit tests and the blob shadow, and the number the
+		// mesh is scaled to match.
+		//
+		// A single centre-to-centre radius cannot be right for both ends of the size range. At the
+		// old fixed 110 from the player's centre, a Runner (BodyRadius 28) started biting with
+		// ~48 units of visible empty space between the two bodies, while a Brute (85) had to be
+		// overlapping the player before it counted - so small bugs bit from thin air and the big
+		// one never seemed to reach. Both are the same bug: the test ignored the model.
+		const float PlayerRadius = Pawn->GetSimpleCollisionRadius();
+
+		// Broad phase at the widest reach, so the grid never culls a bug the exact test would keep.
+		//
+		// Reset first: this array is a member scratch buffer, and QuerySphere only APPENDS. Without
+		// the reset it accumulates across players and across frames, and once any bug dies the
+		// older, longer indices point past the end of Sim and the bounds check fires.
 		ContactScratch.Reset();
-		Grid.QuerySphere(Pawn->GetActorLocation(), KBSettings().ContactRange, INDEX_NONE, Sim, ContactScratch);
+		Grid.QuerySphere(Pawn->GetActorLocation(), PlayerRadius + MaxBodyRadius + KBSettings().ContactGap,
+			INDEX_NONE, Sim, ContactScratch);
 		if (ContactScratch.Num() == 0)
 		{
 			continue;
@@ -728,6 +756,13 @@ void AKBEnemyDirector::TickContactDamage(float DeltaSeconds)
 			const UKBEnemyArchetype* Archetype =
 				Archetypes.IsValidIndex(Sim[Index].ArchetypeIndex) ? Archetypes[Sim[Index].ArchetypeIndex].Get() : nullptr;
 			if (!Archetype)
+			{
+				continue;
+			}
+
+			// Narrow phase: this bug's own reach, not the widest one.
+			const float Reach = PlayerRadius + Archetype->BodyRadius + KBSettings().ContactGap;
+			if (FVector::DistSquared2D(Pawn->GetActorLocation(), Sim[Index].Location) > Reach * Reach)
 			{
 				continue;
 			}

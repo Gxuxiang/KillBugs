@@ -138,9 +138,9 @@ public:
 	float ContactDamageInterval = 0.6f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "战斗|接触伤害",
-		meta = (ToolTip = "虫子中心离玩家多近算贴身（厘米）。",
-			ClampMin = "10.0", UIMax = "1000.0"))
-	float ContactRange = 110.f;
+		meta = (ToolTip = "咬到之前，两个身体之间最多允许空多少（厘米）。\n\n判定是「玩家胶囊半径 + 这只虫的 BodyRadius + 这一项」，所以每只虫的接触距离跟着它自己的模型大小走。\n以前这里是一个固定的「中心到中心 110」，和模型无关 —— 结果小虫子在肉眼还空着近半米时就能咬你，\n而 Brute 那种大块头得跟你重叠上才算。\n\n调小 = 要贴得更近才掉血；0 = 必须真的碰上。",
+			ClampMin = "0.0", UIMax = "200.0"))
+	float ContactGap = 15.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "战斗|接触伤害",
 		meta = (ToolTip = "同一时间最多几只虫能咬同一个玩家。\n\n不设上限的话伤害会随局部密度暴涨——被 40 只虫围住会瞬间秒杀，玩家既来不及反应，也看不出伤害是哪来的。",
@@ -186,6 +186,50 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "波次|局末",
 		meta = (ToolTip = "升级所需的经验基准值。第 N 级升到 N+1 级需要 XpPerLevel × N 点经验，\n所以前几级来得很密、后面越来越慢（总经验 = XpPerLevel × N(N-1)/2）。\n\n调大 = 升级变慢。这会影响卡牌的等级门槛能多早解锁。", ClampMin = "1", UIMax = "2000"))
 	int32 XpPerLevel = 100;
+
+	// =====================================================================================
+	// 撤离
+	// =====================================================================================
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|区域",
+		meta = (ToolTip = "撤离圈的半径（厘米）。全员存活且都在这个圈里，撤离计时才开始走。\n\n和救助圈一样，代码判定和画面上的圈用的是同一个值。", ClampMin = "50.0", UIMax = "1500.0"))
+	float ExtractionRadius = 350.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|时序",
+		meta = (ToolTip = "【撤离计时】全员都在圈里时，要站多久才算撤离成功（秒）。\n\n这段时间里虫子会大规模涌来，所以它是一个守卫战的长度，不是走路的长度。", ClampMin = "1.0", UIMax = "180.0"))
+	float ExtractionSeconds = 30.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|时序",
+		meta = (ToolTip = "【开启时间】撤离点从出现到关闭的总时长（秒）。\n\n它只在“不是全员都在圈里”的时候走；全员进圈时它会冻结，把时间让给撤离计时。\n走完 = 这次撤离失败，撤离点关闭，这一局继续，过 N 波再出现。\n\n【这两个钟互斥，所以整段撤离最多占用 开启时间 + 撤离计时 秒。】", ClampMin = "10.0", UIMax = "600.0"))
+	float ExtractionOpenWindowSeconds = 60.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|时序",
+		meta = (ToolTip = "撤离波次的 Explore 阶段在时序上多留的余量（秒）。\n\n撤离点只在 Explore 阶段出现，而这一阶段的时长会被撑到至少“开启时间 + 撤离计时 + 这个余量”，\n保证整段撤离不会跨到下一个阶段去。", ClampMin = "0.0", UIMax = "60.0"))
+	float ExtractionPhaseTailSeconds = 5.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|排期",
+		meta = (ToolTip = "撤离点第一次出现在第几波（玩家看到的波次编号，从 1 数）。\n\n3 = 第 3 波的 Explore 阶段出现。", ClampMin = "1", UIMax = "50"))
+	int32 ExtractionFirstWave = 3;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|排期",
+		meta = (ToolTip = "多久出现一次（以波计）。撤离失败之后也按这个间隔重新排期。\n\n调小 = 机会更多、整局压力更大。", ClampMin = "1", UIMax = "50"))
+	int32 ExtractionWaveInterval = 3;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|压力",
+		meta = (ToolTip = "【全员进圈读条】期间，刷怪速率取这个值（而不是 Explore 的涓涓细流）。\n\n只在读条时生效：跑过去的那段路、以及有人出圈暂停时，都回到 Explore 的平静。\n默认 12/秒 ≈ 现有的第 5 波强度。", ClampMin = "0.0", UIMax = "60.0"))
+	float ExtractionSpawnRate = 12.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|压力",
+		meta = (ToolTip = "读条期间场上虫子上限。\n\n【不能超过 虫群|MaxEnemies（默认 600）】—— 超了会被静默夹回来，因为增虫的地方会按那一个上限再夹一次。", ClampMin = "10", ClampMax = "2000", UIMax = "600"))
+	int32 ExtractionAliveCap = 520;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|压力",
+		meta = (ToolTip = "【玩家开启撤离的那一刻】在视野外撒这么多虫子，作为回应。\n\n每个撤离点只给一次（第一次全员进圈时），不是每次进出圈都给——\n否则反复进出就能无限刷虫。", ClampMin = "0", UIMax = "300"))
+	int32 ExtractionOpeningBurst = 30;
+
+	UPROPERTY(Config, EditAnywhere, Category = "撤离|区域",
+		meta = (ToolTip = "候选点离竞技场边缘至少留出的距离（厘米）。\n\n保证整个撤离圈落在墙内，不然会出现“圈有一半在墙外面”的情况。\n改成生成式迷宫之后，候选点会换成房间中心，这个值就只在找落点时还有意义。", ClampMin = "0.0", UIMax = "3000.0"))
+	float ExtractionEdgeMargin = 600.f;
 
 	// =====================================================================================
 	// 受伤反馈

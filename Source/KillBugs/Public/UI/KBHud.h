@@ -74,6 +74,25 @@ protected:
 	void DrawRescueCircles();
 
 	/**
+	 * The extraction ring on the floor, with its two clocks.
+	 *
+	 * A ring alone would be a lie: the readout has to say WHICH clock is running, because the
+	 * difference between "the window is draining while we are not all in" and "we are filling the
+	 * progress bar" is the whole mechanic, and both look identical from a circle on the ground.
+	 * The window number is shown as the "still have time" countdown; the progress is the arc.
+	 */
+	void DrawExtractionZone();
+
+	/**
+	 * The pre-announcement and the off-screen arrow for the extraction zone.
+	 *
+	 * The zone appears somewhere far from the team on purpose, so "it is on screen" cannot be
+	 * assumed - and a mechanic the player cannot find is a mechanic that does not exist. The
+	 * announcement ("N 波后出现撤离点") is what stops it from feeling like an ambush.
+	 */
+	void DrawExtractionIndicator();
+
+	/**
 	 * The end-of-run summary, shown while the phase is RunOver.
 	 *
 	 * It has to be on screen for the whole RunSummarySeconds window, because that window is the
@@ -118,6 +137,9 @@ protected:
 
 	/** Cached so the HUD is not iterating the world every frame. */
 	TWeakObjectPtr<const class AKBEnemyDirector> CachedEnemyDirector;
+
+	/** Resolved on first use, like the director; the zone is spawned once, at run start. */
+	TWeakObjectPtr<const class AKBExtractionZone> CachedExtractionZone;
 
 	/**
 	 * Card the cursor was over last frame, so the hover sound fires once on ENTER rather than
