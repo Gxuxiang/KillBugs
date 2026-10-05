@@ -219,7 +219,8 @@ Lobby: ... is the host / joined (index 0, 1 player(s))
 
 修法是把"局终"变成真正的停止，`EndRun` 里补上三步（**两个结局都走**，这是单一收口的意义）：
 
-1. `EnemyDirector->CullAllRemaining()` —— 现成的清场路径，只重置数组、标脏，不生成任何特效；
+1. `EnemyDirector->SetSimulationFrozen(true)` —— **冻住**虫群（不转向、不分离、不咬人），
+   不是删掉。为什么是"冻"不是"删"见下面第 6 条——**这里改过一次，第一版是删**；
 2. 给每个玩家角色置一个**复制的** `bRunOver`（`AKBCharacter`），客户端也应用同一套冻结：
    停移动、`DisableMovement`、关掉角色 tick。**复制是必须的**——移动是客户端预测的，
    只在服务端停，客户端会拖着自己的角色在结算界面下面继续走（和 `bDowned` 同一个理由，
@@ -232,6 +233,31 @@ Lobby: ... is the host / joined (index 0, 1 player(s))
 
 实测：`Run over (extracted)` 之后**一行 `Bullet #` / `FireFeedback` 都没有了**（之前一直打到上飞船），
 而且 `Run done: travelling back to the lobby` 照常发生——冻结没有挡住回大厅的路。
+
+**6. 清场改成了冻结（第五次实机崩了，第一版是"删掉虫群"）。**
+
+第一版 `EndRun` 用的是 `CullAllRemaining()`。查证之后发现：
+
+- **`CullAllRemaining()` 在全仓库从来没有被调用过**（零调用者）。也就是说 `KBGoreComponent`
+  注释里那句"波次清场也会移除幸存者，所以要过滤掉"描述的**场景一直不存在**——
+  过滤器只挡 `bIsTearingDown`。
+- 于是这一刀清场，在 gore 看来就是 **186 只虫同时死亡**：186 次爆浆 + 186 张贴花，
+  全灌进结算界面弹出来的那一帧，而 12 秒后地图就要被拆掉。
+
+**原理**：死亡在网络上就是"一项从复制数组里消失"，所以**每一台机器都是从移除推导死亡的**。
+一次删除 N 项，就等于 N 次死亡——这是这套零带宽设计的代价，平时看不出来，因为没人一次删过一整场。
+
+改法：`EndRun` 调 `SetSimulationFrozen(true)`，导演的 `Tick` 直接跳过 `SimulateSwarm` 和
+`TickContactDamage`（`SyncReplication` 照跑，免得数组发霉）。虫群原地冻住、不咬人、**没有任何移除**。
+无头实测：`Run over: 26 bug(s) frozen in place`。
+
+同时给 gore 补了"局终不算死亡"的过滤——现在这条路径不再被触发，但 `CullAllRemaining` 还在
+（它是留给将来清场用的），这条过滤是让它用的时候不会变成一场集体死亡。
+
+**顺带留下一个未解的崩溃**：那一局在**开始加载大厅地图后约 2 秒**崩了，栈全在引擎里——
+`UNiagaraScript::Serialize` ← `LoadPackage` ← `UEngine::LoadMap`，没有一帧 KillBugs。
+和上面那个 186 次 Niagara 爆发在时间上挨得很近，所以怀疑有关，但**没有证据**。
+改掉清场之后需要再打几局看它还出不出现。
 
 ### 还没验的（诚实划界）
 
@@ -478,7 +504,7 @@ OSS: Session (KillBugsGame) already exists, can't join twice
 | **队友的血条** | ✅ 用户已确认（左下角 `AKBHud::DrawPartyStatus`） |
 | **撤离：整条状态机**（开点 → 窗口耗尽后这局继续 → 全员进圈冻结并读条 → 有人离开进度保留而窗口续走 → 读满撤离成功） | ✅ 实测（无头 `KB.Extract.SelfTest`，一条命令走完五种情形，日志逐条可对，见本轮） |
 | **撤离成功后回大厅** | ✅ 实测（`Run over (extracted)` → summary → `travelling back to the lobby` → 大厅起来） |
-| **一局结束后世界立刻停下**（清场 + 锁住玩家 + 停火） | ✅ 无头实测（`Run over` 之后零条 `Bullet #`/`FireFeedback`，回大厅照常）；**画面观感未经人验** |
+| **一局结束后世界立刻停下**（冻住虫群 + 锁住玩家 + 停火） | ✅ 无头实测（`Run over: 26 bug(s) frozen in place`、之后零条 `Bullet #`/`FireFeedback`、回大厅照常）；**画面观感未经人验** |
 | **倒地者不再自动开火**（顺带修掉的旧 bug） | ⚠️ 逻辑上已堵住（同一条判断），但**没有人专门验过倒地场景** |
 | 撤离的**画面**（地面圆环、两个数字、边缘箭头、预告文字） | ❌ **没有任何人看过**。`-nullrhi` 下 `DrawHUD` 不执行，必须开窗口跑一次 |
 | 撤离的**排期路径**（第 N 波的 Explore 阶段自动开点、Explore 被撑长） | ✅ 实测（用户在窗口里玩到第 3 波：`Explore: 95s`（不是 90）+ `Extraction zone opened at (4550, 4550)`，位置正是离玩家最远的角） |

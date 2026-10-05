@@ -103,6 +103,22 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 		return;
 	}
 
+	// A run that has ended stops the swarm where it stands.
+	//
+	// Freezing rather than culling, and the difference is not cosmetic. Culling removes every
+	// survivor from the replicated array at once - and every machine derives "a bug died" from
+	// exactly that removal, because a death over the network IS an item vanishing. So ending a run
+	// over a field of 186 bugs read as 186 deaths at once: 186 splats and 186 puddles into the
+	// frame the summary appeared, and a burst of Niagara work in the twelve seconds before a map
+	// load. Frozen, they simply stop: no movement, no biting, nothing to remove.
+	//
+	// SyncReplication still runs so the array is never left stale; the values just stop changing.
+	if (bSimulationFrozen)
+	{
+		SyncReplication(DeltaSeconds);
+		return;
+	}
+
 	const double StartSeconds = FPlatformTime::Seconds();
 	SimulateSwarm(DeltaSeconds);
 	const double AfterSimSeconds = FPlatformTime::Seconds();

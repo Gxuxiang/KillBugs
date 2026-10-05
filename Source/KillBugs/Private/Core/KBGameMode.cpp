@@ -243,12 +243,23 @@ void AKBGameMode::EndRun(EKBRunResult Result)
 	// shooting all the way through the twelve seconds the summary is on screen. That is what a
 	// successful extraction looked like - a "撤离成功" panel over a fight still in progress.
 	//
-	// Culling is the wave-clear path the director already had, and the freeze is replicated
-	// because movement is client-predicted (see AKBCharacter::bRunOver). Both endings get it:
-	// the run is over, and it is over the same way whichever door it left by.
+	// The swarm is FROZEN, not culled. Culling would be the obvious way to make the arena go
+	// quiet, but a removal from the replicated array is exactly how every machine detects a death
+	// - so culling 186 survivors reads as 186 simultaneous kills and throws a field of splatter
+	// into the summary frame. Freezing stops the same things and removes nothing.
+	//
+	// The player freeze is replicated, because movement is client-predicted (see
+	// AKBCharacter::bRunOver). Both endings get all of it: the run is over, and it is over the
+	// same way whichever door it left by.
 	if (EnemyDirector)
 	{
-		EnemyDirector->CullAllRemaining();
+		EnemyDirector->SetSimulationFrozen(true);
+
+		// Logged because the difference between freezing and culling is invisible from outside:
+		// a headless run cannot see the arena, and "0 bugs" and "200 bugs standing still" both
+		// look like nothing happening.
+		UE_LOG(LogKillBugs, Display, TEXT("Run over: %d bug(s) frozen in place"),
+			EnemyDirector->GetEnemyCount());
 	}
 
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)

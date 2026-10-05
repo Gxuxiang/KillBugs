@@ -81,6 +81,15 @@ public:
 	 */
 	void SetEnemyScaling(float InDamageTakenScale, float InSpeedScale);
 
+	/**
+	 * Stops the swarm where it stands: no steering, no separation, no biting.
+	 *
+	 * Used when a run ends. Freezing rather than culling is deliberate - see the note in Tick.
+	 * Nothing about it needs replicating, because clients never simulate: they render the
+	 * replicated array, which simply stops changing.
+	 */
+	void SetSimulationFrozen(bool bInFrozen) { bSimulationFrozen = bInFrozen; }
+
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Swarm")
 	float GetEnemyDamageTakenScale() const { return EnemyDamageTakenScale; }
 
@@ -229,6 +238,9 @@ private:
 	/** See SetEnemyScaling. Baselines of 1 mean "exactly the archetype's numbers". */
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Combat")
 	float EnemyDamageTakenScale = 1.f;
+
+	/** Set when the run ends. See SetSimulationFrozen. */
+	bool bSimulationFrozen = false;
 
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Combat")
 	float EnemySpeedScale = 1.f;

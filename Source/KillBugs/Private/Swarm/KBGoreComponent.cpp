@@ -3,6 +3,7 @@
 #include "Audio/KBListenerLocation.h"
 #include "Components/AudioComponent.h"
 #include "Components/DecalComponent.h"
+#include "Core/KBGameState.h"
 #include "Data/KBEnemyArchetype.h"
 #include "Engine/World.h"
 #include "KBGameSettings.h"
@@ -177,14 +178,29 @@ int32 UKBGoreComponent::AcquireDecalSlot()
 
 void UKBGoreComponent::OnBugDied(const FVector& Location, int32 ArchetypeIndex)
 {
-	// A bug can stop being replicated without dying: a wave cull removes every survivor, and
-	// tearing the map down removes all of them at once. The visualizer calls us for every
-	// purge it does and cannot tell the difference, so the filter belongs here.
+	// A bug can stop being replicated without dying: tearing the map down removes all of them at
+	// once, and AKBEnemyDirector::CullAllRemaining - the wave-clear path - removes every survivor
+	// at once. The visualizer calls us for every purge it does and cannot tell the difference, so
+	// the filter belongs here.
+	//
+	// The run-over half of this is not hypothetical. Ending a run used to cull the survivors, and
+	// over a field of 186 bugs that read as 186 simultaneous deaths: 186 splats and 186 puddles
+	// into the frame the summary appeared. That path now freezes the swarm instead (see
+	// AKBEnemyDirector::Tick), but the cull call is still there for a wave clear to use, and this
+	// is what keeps it from reading as a mass death when it is used.
 	if (UWorld* World = GetWorld())
 	{
 		if (World->bIsTearingDown)
 		{
 			return;
+		}
+
+		if (const AKBGameState* RunState = World->GetGameState<AKBGameState>())
+		{
+			if (RunState->GetWavePhase() == EKBWavePhase::RunOver)
+			{
+				return;
+			}
 		}
 	}
 
