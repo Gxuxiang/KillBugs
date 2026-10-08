@@ -5,6 +5,7 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/World.h"
+#include "HAL/PlatformApplicationMisc.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "KillBugs.h"
@@ -202,6 +203,15 @@ void AKBLobbyPlayerController::HandleLobbyClick()
 			LobbyHud->ToggleShop();
 			return;
 
+		case EKBLobbyButton::ManualJoin:
+			PlayClickFeedback();
+			LobbyHud->BeginAddressEntry();
+			return;
+
+		case EKBLobbyButton::CopyAddress:
+			CopyLocalAddress(LobbyHud);
+			return;
+
 		default:
 			return;
 		}
@@ -340,6 +350,149 @@ void AKBLobbyPlayerController::HandleShopClick(AKBLobbyHud* LobbyHud)
 	// Refusals keep their reason on screen; successes say what happened. Both are drawn on the
 	// status line the lobby already has, so no new widget is invented for it.
 	LobbyHud->SetShopMessage(Reason);
+	PlayClickFeedback();
+}
+
+namespace
+{
+	/**
+	 * The character a key would type, or false for keys that type nothing.
+	 *
+	 * An explicit table rather than FKey::GetDisplayName(): the display name is localised and
+	 * layout-dependent, so on a French keyboard it would hand back something that is not a digit.
+	 */
+	bool KeyToAddressCharacter(const FKey& Key, TCHAR& OutCharacter)
+	{
+		const FKey DigitKeys[10] =
+		{
+			EKeys::Zero, EKeys::One, EKeys::Two, EKeys::Three, EKeys::Four,
+			EKeys::Five, EKeys::Six, EKeys::Seven, EKeys::Eight, EKeys::Nine
+		};
+
+		const FKey NumpadKeys[10] =
+		{
+			EKeys::NumPadZero, EKeys::NumPadOne, EKeys::NumPadTwo, EKeys::NumPadThree, EKeys::NumPadFour,
+			EKeys::NumPadFive, EKeys::NumPadSix, EKeys::NumPadSeven, EKeys::NumPadEight, EKeys::NumPadNine
+		};
+
+		for (int32 Index = 0; Index < 10; ++Index)
+		{
+			if (Key == DigitKeys[Index] || Key == NumpadKeys[Index])
+			{
+				OutCharacter = static_cast<TCHAR>(TEXT('0') + Index);
+				return true;
+			}
+		}
+
+		if (Key == EKeys::Period || Key == EKeys::Decimal)
+		{
+			OutCharacter = TEXT('.');
+			return true;
+		}
+
+		return false;
+	}
+}
+
+bool AKBLobbyPlayerController::InputKey(const FInputKeyEventArgs& EventArgs)
+{
+	AKBLobbyHud* LobbyHud = GetHUD<AKBLobbyHud>();
+
+	// Everything takes the normal path unless the address field is open - this override exists
+	// for one field and must not become a second input system.
+	if (!LobbyHud || !LobbyHud->IsTypingAddress())
+	{
+		return Super::InputKey(EventArgs);
+	}
+
+	// Presses and repeats only. Handling the release as well would append every character twice.
+	if (EventArgs.Event != IE_Pressed && EventArgs.Event != IE_Repeat)
+	{
+		return true;
+	}
+
+	const FKey Key = EventArgs.Key;
+
+	if (Key == EKeys::Escape)
+	{
+		LobbyHud->CancelAddressEntry();
+		return true;
+	}
+
+	if (Key == EKeys::Enter)
+	{
+		CommitManualJoin(LobbyHud);
+		return true;
+	}
+
+	if (Key == EKeys::BackSpace)
+	{
+		LobbyHud->BackspaceAddress();
+		return true;
+	}
+
+	// Both Ctrl keys: which one a player reaches for is not worth guessing at.
+	if (Key == EKeys::V && (IsInputKeyDown(EKeys::LeftControl) || IsInputKeyDown(EKeys::RightControl)))
+	{
+		LobbyHud->PasteAddressFromClipboard();
+		return true;
+	}
+
+	// Not named Character: APlayerController already has a member by that name, and shadowing it
+	// is a warning-as-error in this project.
+	TCHAR TypedCharacter = 0;
+	if (KeyToAddressCharacter(Key, TypedCharacter))
+	{
+		LobbyHud->AppendAddressChar(TypedCharacter);
+	}
+
+	// Everything else is swallowed while the field is open, so a stray key cannot reach the
+	// lobby behind it.
+	return true;
+}
+
+void AKBLobbyPlayerController::CommitManualJoin(AKBLobbyHud* LobbyHud)
+{
+	const FString Typed = LobbyHud->TakeAddressBuffer();
+	if (Typed.IsEmpty())
+	{
+		LobbyHud->SetShopMessage(TEXT("没有输入地址"));
+		return;
+	}
+
+	UKBSessionSubsystem* Sessions =
+		GetGameInstance() ? GetGameInstance()->GetSubsystem<UKBSessionSubsystem>() : nullptr;
+	if (!Sessions)
+	{
+		return;
+	}
+
+	const FString Address = UKBSessionSubsystem::NormalizeJoinAddress(Typed);
+
+	// The outcome goes on the status line the lobby already has, rather than into a second
+	// place to look - the same bargain HandleShopClick made.
+	LobbyHud->SetShopMessage(FString::Printf(TEXT("直连 %s…"), *Address));
+
+	PlayClickFeedback();
+	Sessions->JoinAddress(Address);
+}
+
+void AKBLobbyPlayerController::CopyLocalAddress(AKBLobbyHud* LobbyHud)
+{
+	const FString Own = LobbyHud->GetPreferredLocalAddress();
+	if (Own.IsEmpty())
+	{
+		LobbyHud->SetShopMessage(TEXT("没有可复制的地址（没联网？）"));
+		return;
+	}
+
+	// Copied WITH the port, not just the IP: the other player pastes it straight into the field
+	// above, and the port is the part they cannot be expected to know. NormalizeJoinAddress is
+	// what decides it, so the clipboard and the typed path agree by construction.
+	const FString Address = UKBSessionSubsystem::NormalizeJoinAddress(Own);
+	FPlatformApplicationMisc::ClipboardCopy(*Address);
+
+	LobbyHud->SetShopMessage(FString::Printf(TEXT("已复制 %s"), *Address));
 	PlayClickFeedback();
 }
 

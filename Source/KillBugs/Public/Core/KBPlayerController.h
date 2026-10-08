@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Core/KBGameState.h"
 #include "GameFramework/PlayerController.h"
+#include "Loot/KBLootTypes.h"
 #include "KBPlayerController.generated.h"
 
 class UInputMappingContext;
@@ -33,6 +34,104 @@ public:
 
 	/** The pawn binds this to drive manual weapons. May be null if setup failed. */
 	UInputAction* GetFireAction() const { return FireAction; }
+
+	/** The pawn binds this to use a medkit. May be null if setup failed. */
+	UInputAction* GetUseItemAction() const { return UseItemAction; }
+
+	/** The pawn binds these to use the hotbar slots. Any may be null if setup failed. */
+	UInputAction* GetHotbarAction(int32 SlotIndex) const
+	{
+		return HotbarActions.IsValidIndex(SlotIndex) ? HotbarActions[SlotIndex] : nullptr;
+	}
+
+	/** The pawn binds this to open/close the backpack panel. */
+	UInputAction* GetBackpackAction() const { return BackpackAction; }
+
+	/** The pawn binds this to open a row's menu. */
+	UInputAction* GetBackpackMenuAction() const { return BackpackMenuAction; }
+
+	// ---- The hotbar ------------------------------------------------------------------------
+
+	/**
+	 * Slots for USABLE consumables, not for weapons. Weapons get their own bar later.
+	 *
+	 * Six for the same accidental reason the weapon list is capped at six, but the two numbers
+	 * are unrelated - this one is fixed because the input bindings are written out one per slot,
+	 * so a configurable count could disagree with the keys that exist.
+	 */
+	static constexpr int32 HotbarSlots = 6;
+
+	/** Bounds check for the fixed-size array below. */
+	static bool IsValidHotbarSlot(int32 SlotIndex) { return SlotIndex >= 0 && SlotIndex < HotbarSlots; }
+
+	/** Which consumable a number key uses. False means the slot is empty. */
+	bool GetHotbarSlot(int32 SlotIndex, EKBItemType& OutType) const;
+
+	/** Puts an item in a slot, removing it from any other slot it occupied. */
+	void SetHotbarSlot(int32 SlotIndex, EKBItemType Type);
+	void ClearHotbarSlot(int32 SlotIndex);
+
+	/** Swaps two slots outright, contents and all. */
+	void SwapHotbarSlots(int32 A, int32 B);
+
+	// ---- Click-to-move ---------------------------------------------------------------------
+	//
+	// One gesture, three outcomes: pick something up (a backpack row or a hotbar slot), then put
+	// it down somewhere. Backpack -> slot assigns it to the key you chose; slot -> backpack takes
+	// it off the bar; slot -> slot swaps the two. Doing it this way means "choose the key",
+	// "unequip" and "reorder" are the same interaction rather than three.
+	//
+	// Public because the mouse handler is not the only caller - the console commands drive the
+	// same functions, which is the only way any of this can be checked in a headless run.
+
+	enum class EKBBackpackPick : uint8
+	{
+		None,
+		BackpackRow,
+		HotbarSlot
+	};
+
+	void PickHotbarSlot(int32 SlotIndex);
+
+	/** Only rows that can be equipped are worth picking up; others are refused with a reason. */
+	void PickBackpackRow(int32 RowIndex);
+
+	void ClearBackpackPick();
+
+	EKBBackpackPick GetBackpackPick(int32& OutIndex) const { OutIndex = PickedIndex; return PickedKind; }
+
+	/** Puts whatever is picked into this slot. Returns whether anything moved. */
+	bool ApplyPickToHotbarSlot(int32 SlotIndex);
+
+	/** Takes whatever is picked off the bar. Returns whether anything moved. */
+	bool ApplyPickToBackpack();
+
+	// ---- Backpack panel --------------------------------------------------------------------
+
+	bool IsBackpackOpen() const { return bBackpackOpen; }
+	void ToggleBackpack() { bBackpackOpen = !bBackpackOpen; }
+
+	/**
+	 * Right-click: open the menu for whatever row is under the cursor.
+	 *
+	 * A no-op unless the panel is open and the cursor is over a row, so a stray right-click
+	 * during a fight costs nothing.
+	 */
+	void OpenBackpackMenuUnderCursor();
+
+	/**
+	 * Left-click, tried BEFORE the trigger arms - the panel has to consume the click that
+	 * chooses a menu entry, or picking an entry also fires the gun. Returns true if the click
+	 * was the panel's, in which case the caller must not fire.
+	 *
+	 * Only a click that actually lands on something is consumed, so clicking empty space still
+	 * shoots - the same bargain the card draft makes.
+	 */
+	bool TryHandleBackpackClick();
+
+	/** Row whose menu is open, or INDEX_NONE. The HUD draws it; the click handler dispatches it. */
+	int32 GetOpenBackpackMenuRow() const { return OpenBackpackMenuRow; }
+	FVector2D GetBackpackMenuPosition() const { return BackpackMenuPosition; }
 
 	/**
 	 * Card draft pick. Reliable, because losing it would stall the run until the draft times
@@ -105,6 +204,52 @@ protected:
 	 */
 	UPROPERTY(Transient)
 	TObjectPtr<UInputAction> FireAction;
+
+	/**
+	 * Use-item input, built beside FireAction and for the same reasons.
+	 *
+	 * Q rather than a function key: the left hand is on WASD, so anything the player presses
+	 * mid-fight should be reachable without moving it.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> UseItemAction;
+
+	/**
+	 * Six separate actions, one per number key.
+	 *
+	 * Deliberately NOT one Axis1D action mapped to six keys: every key would report the same
+	 * value and the handler could not tell which digit was pressed. Distinguishing them that way
+	 * needs a scalar modifier per key, which is the "one action with modifiers" design this file
+	 * already rejects for fire and use.
+	 */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UInputAction>> HotbarActions;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> BackpackAction;
+
+	/** Right mouse. Opens a row's menu; never a trigger, so it needs no click arbitration. */
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> BackpackMenuAction;
+
+	/**
+	 * The hotbar contents - LOCAL state, not replicated, and that is deliberate.
+	 *
+	 * It is a key mapping ("the 1 key uses a medkit"), not world state: using the item still goes
+	 * to the server, which validates it against the backpack it owns. A server that knew which
+	 * slot the player had assigned would learn nothing it could act on.
+	 */
+	TOptional<EKBItemType> Hotbar[HotbarSlots];
+
+	bool bBackpackOpen = false;
+
+	/** What the click-to-move gesture has picked up and is waiting to put down. */
+	EKBBackpackPick PickedKind = EKBBackpackPick::None;
+	int32 PickedIndex = INDEX_NONE;
+
+	/** Which row's menu is open, and where it was drawn. Both are local HUD state. */
+	int32 OpenBackpackMenuRow = INDEX_NONE;
+	FVector2D BackpackMenuPosition = FVector2D::ZeroVector;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UInputMappingContext> RuntimeMappingContext;

@@ -8,13 +8,15 @@
 /**
  * The local player's profile, as it exists on disk.
  *
- * Deliberately narrow. Gold is the only thing the game has that is meant to outlive a run, so it
- * is the only thing stored; the stash arrives with the loot system, when there is something to
- * put in it and therefore something to be right about. Writing a container for loot that does not
- * exist yet would be guessing twice - once about the shape, once about the contents.
+ * Deliberately narrow, and grown one field at a time: gold, then materials, then the stash, then
+ * carried medkits. Each was added when the game had something to put in it, because a container
+ * written ahead of its contents is a guess twice over - once about the shape, once about what
+ * goes in it. (This comment used to say gold was the only thing that outlived a run, which stopped
+ * being true two fields ago.)
  *
- * SaveVersion exists so that field can be added later without the loader having to guess what it
- * is reading.
+ * The format carries the reason it can be grown this cheaply: USaveGame serializes by tag, so a
+ * field that did not exist when a file was written loads at its default. SaveVersion records which
+ * build wrote the file, and is reported rather than enforced - there is nothing to enforce.
  */
 UCLASS()
 class KILLBUGS_API UKBSaveGame : public USaveGame
@@ -23,7 +25,7 @@ class KILLBUGS_API UKBSaveGame : public USaveGame
 
 public:
 	/** The current on-disk layout. Bump when a field is added or its meaning changes. */
-	static constexpr int32 CurrentVersion = 3;
+	static constexpr int32 CurrentVersion = 4;
 
 	/** The persisted total, across every run this machine has ever finished. */
 	UPROPERTY()
@@ -41,6 +43,20 @@ public:
 	 */
 	UPROPERTY()
 	int32 Materials = 0;
+
+	/**
+	 * Medkits in the stash - the first thing the stash holds that is neither currency nor a weapon.
+	 *
+	 * A scalar for the same reason Materials is one, and the same promise applies: a file written
+	 * before this field existed loads with it at 0, which is the correct value for a build that
+	 * had no carried consumables. A v3 file therefore needs no migration.
+	 *
+	 * Unlike materials, this travels BOTH ways: the whole stash comes into the run, and what is
+	 * still in the backpack at the end replaces it. A wipe takes the ones that were carried in,
+	 * exactly as it takes the weapons.
+	 */
+	UPROPERTY()
+	int32 Medkits = 0;
 
 	/**
 	 * The weapons this machine owns, and which of them are chosen for the next run.

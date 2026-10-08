@@ -6,6 +6,8 @@
 #include "KBGameSettings.h"
 #include "KillBugs.h"
 #include "OnlineSubsystem.h"
+#include "Interfaces/IPv4/IPv4Address.h"
+#include "SocketSubsystem.h"
 
 // Interfaces/OnlineSessionInterface.h only forward-declares these four; the definitions live
 // here. Without it every use of FOnlineSessionSettings/FOnlineSessionSearch is an incomplete
@@ -494,6 +496,77 @@ void UKBSessionSubsystem::JoinAddress(const FString& Address)
 	UE_LOG(LogKillBugs, Display, TEXT("Session: joining %s directly, skipping discovery"), *Address);
 
 	ConnectTo(Address);
+}
+
+FString UKBSessionSubsystem::NormalizeJoinAddress(const FString& Typed)
+{
+	FString Trimmed = Typed;
+	Trimmed.TrimStartAndEndInline();
+
+	if (Trimmed.IsEmpty())
+	{
+		return Trimmed;
+	}
+
+	// Already has a port? Leave it exactly as typed. Guessing here would quietly redirect a
+	// deliberate choice.
+	if (Trimmed.Contains(TEXT(":")))
+	{
+		return Trimmed;
+	}
+
+	return FString::Printf(TEXT("%s:%d"), *Trimmed, DefaultGamePort);
+}
+
+TArray<FString> UKBSessionSubsystem::GetLocalIPv4Addresses()
+{
+	TArray<FString> Result;
+
+	ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+	if (!SocketSubsystem)
+	{
+		return Result;
+	}
+
+	TArray<TSharedPtr<FInternetAddr>> AdapterAddresses;
+	if (!SocketSubsystem->GetLocalAdapterAddresses(AdapterAddresses))
+	{
+		return Result;
+	}
+
+	for (const TSharedPtr<FInternetAddr>& Address : AdapterAddresses)
+	{
+		if (!Address.IsValid() || Address->GetProtocolType() != FNetworkProtocolTypes::IPv4)
+		{
+			continue;
+		}
+
+		// Filtered on the STRING rather than on the address structure: it is the same value the
+		// player will read and type, so what is filtered and what is shown can never disagree.
+		// 127.x is this machine, and 169.254.x is a DHCP failure - neither is dialable.
+		const FString Text = Address->ToString(false);
+		if (Text.StartsWith(TEXT("127.")) || Text.StartsWith(TEXT("169.254.")))
+		{
+			continue;
+		}
+
+		Result.AddUnique(Text);
+	}
+
+	// Best first. A heuristic, and labelled as one: a home LAN is almost always 192.168.x, a
+	// corporate one 10.x, and the rest of 172.x is where virtual adapters (WSL, Docker, VMware)
+	// sit - which is exactly the one you do NOT want to read out loud.
+	auto Rank = [](const FString& Ip)
+	{
+		if (Ip.StartsWith(TEXT("192.168."))) { return 0; }
+		if (Ip.StartsWith(TEXT("10.")))      { return 1; }
+		if (Ip.StartsWith(TEXT("172.")))     { return 2; }
+		return 3;
+	};
+
+	Result.Sort([&Rank](const FString& A, const FString& B) { return Rank(A) < Rank(B); });
+
+	return Result;
 }
 
 void UKBSessionSubsystem::LeaveSession()

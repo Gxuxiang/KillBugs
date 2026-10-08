@@ -74,6 +74,7 @@ void UKBProfileSubsystem::LoadProfile()
 
 	BankedGold = 0;
 	BankedMaterials = 0;
+	BankedMedkits = 0;
 	Stash.Reset();
 
 	if (!UGameplayStatics::DoesSaveGameExist(Slot, User))
@@ -131,6 +132,7 @@ void UKBProfileSubsystem::LoadProfile()
 	// number (including seeding it into a PlayerState) would rather see a sane value.
 	BankedGold = FMath::Clamp(Profile->Gold, 0, MaxBankedGold());
 	BankedMaterials = FMath::Clamp(Profile->Materials, 0, MaxBankedMaterials());
+	BankedMedkits = FMath::Clamp(Profile->Medkits, 0, MaxBankedMedkits());
 
 	// Loaded as it is, including an EMPTY stash. A v2 file (gold and materials only) legitimately
 	// has no weapons, and an emptied one is a player who lost them - neither is a reason to hand
@@ -141,8 +143,8 @@ void UKBProfileSubsystem::LoadProfile()
 	// The version is reported rather than enforced: a file written by an older build is a valid
 	// file, and USaveGame's tagged format means its missing fields already read as their defaults.
 	UE_LOG(LogKillBugs, Display,
-		TEXT("KBProfile: loaded '%s' (user %d): %d gold | %d materials | %d weapon(s) (save v%d)"),
-		*Slot, User, BankedGold, BankedMaterials, Stash.Num(), Profile->SaveVersion);
+		TEXT("KBProfile: loaded '%s' (user %d): %d gold | %d materials | %d medkit(s) | %d weapon(s) (save v%d)"),
+		*Slot, User, BankedGold, BankedMaterials, BankedMedkits, Stash.Num(), Profile->SaveVersion);
 }
 
 bool UKBProfileSubsystem::SaveProfile() const
@@ -157,6 +159,7 @@ bool UKBProfileSubsystem::SaveProfile() const
 
 	Profile->Gold = BankedGold;
 	Profile->Materials = BankedMaterials;
+	Profile->Medkits = BankedMedkits;
 	Profile->Stash = Stash;
 	Profile->SaveVersion = UKBSaveGame::CurrentVersion;
 
@@ -190,6 +193,11 @@ void UKBProfileSubsystem::BeginRun()
 			CarriedThisRun.Add(Entry.Definition);
 		}
 	}
+
+	// The same snapshot for the medkits, and for the same reason: they all come into the run, so
+	// by the end of it the backpack also holds whatever was found in there, and "brought" and
+	// "found" have to be told apart to know what a wipe costs.
+	CarriedMedkitsThisRun = BankedMedkits;
 }
 
 // ---- Shop ------------------------------------------------------------------------------------
@@ -450,15 +458,61 @@ void UKBProfileSubsystem::LoseCarriedWeapons()
 	CarriedThisRun.Reset();
 }
 
-void UKBProfileSubsystem::AddBankedForDebug(int32 Gold, int32 Materials)
+void UKBProfileSubsystem::ApplyExtractedMedkits(int32 CarriedOut)
 {
-	BankedGold = FMath::Clamp(BankedGold + Gold, 0, MaxBankedGold());
-	BankedMaterials = FMath::Clamp(BankedMaterials + Materials, 0, MaxBankedMaterials());
+	// Absolute, not additive, and that is the whole difference from BankRunMaterials: the entire
+	// stash was carried into the run, so what came out of it IS the new stock. Adding instead
+	// would inflate the stash by whatever the player happened to be carrying, every single run.
+	const int32 Before = BankedMedkits;
+	BankedMedkits = FMath::Clamp(CarriedOut, 0, MaxBankedMedkits());
 
 	SaveProfile();
 
-	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: debug grant -> %d gold | %d materials"),
-		BankedGold, BankedMaterials);
+	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: extraction banked medkits %d -> %d"),
+		Before, BankedMedkits);
+}
+
+void UKBProfileSubsystem::LoseCarriedMedkits()
+{
+	const int32 Taken = FMath::Min(CarriedMedkitsThisRun, BankedMedkits);
+	const int32 Before = BankedMedkits;
+
+	BankedMedkits -= Taken;
+
+	// Consumed, so this is idempotent: the loss IS this subtraction, and a second call must take
+	// nothing. That is what makes a latch unnecessary here - unlike the two currencies, which add
+	// and therefore have to be told when to stop. LoseCarriedWeapons does the same thing by
+	// clearing its snapshot.
+	CarriedMedkitsThisRun = 0;
+
+	SaveProfile();
+
+	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: wipe took %d carried medkit(s), bank %d -> %d"),
+		Taken, Before, BankedMedkits);
+}
+
+void UKBProfileSubsystem::AddBankedForDebug(int32 Gold, int32 Materials, int32 Medkits)
+{
+	BankedGold = FMath::Clamp(BankedGold + Gold, 0, MaxBankedGold());
+	BankedMaterials = FMath::Clamp(BankedMaterials + Materials, 0, MaxBankedMaterials());
+	BankedMedkits = FMath::Clamp(BankedMedkits + Medkits, 0, MaxBankedMedkits());
+
+	SaveProfile();
+
+	UE_LOG(LogKillBugs, Display, TEXT("KBProfile: debug grant -> %d gold | %d materials | %d medkit(s)"),
+		BankedGold, BankedMaterials, BankedMedkits);
+}
+
+void UKBProfileSubsystem::ClearBankedMedkitsForDebug()
+{
+	const int32 Before = BankedMedkits;
+	BankedMedkits = 0;
+
+	SaveProfile();
+
+	UE_LOG(LogKillBugs, Display,
+		TEXT("KBProfile: banked medkits cleared (%d -> 0; gold, materials and weapons untouched)"),
+		Before);
 }
 
 void UKBProfileSubsystem::ReloadProfile()
@@ -512,9 +566,11 @@ void UKBProfileSubsystem::ResetProfile()
 
 	BankedGold = 0;
 	BankedMaterials = 0;
+	BankedMedkits = 0;
 	bBankedThisRun = false;
 	bMaterialsBankedThisRun = false;
 	CarriedThisRun.Reset();
+	CarriedMedkitsThisRun = 0;
 
 	// Reset means "as if installed fresh", so the starters come back with it - and are written
 	// immediately, so a reload in the same process sees the same thing a restart would.
@@ -548,8 +604,9 @@ namespace KBProfileCommands
 		const int32 User = UKBProfileSubsystem::GetUserIndex();
 
 		UE_LOG(LogKillBugs, Display,
-			TEXT("KBProfile: banked %d gold | %d materials | %d weapon(s) | slot '%s' (user %d) | file %s"),
-			Profile->GetBankedGold(), Profile->GetBankedMaterials(), Profile->GetStash().Num(),
+			TEXT("KBProfile: banked %d gold | %d materials | %d medkit(s) | %d weapon(s) | slot '%s' (user %d) | file %s"),
+			Profile->GetBankedGold(), Profile->GetBankedMaterials(), Profile->GetBankedMedkits(),
+			Profile->GetStash().Num(),
 			*Slot, User,
 			UGameplayStatics::DoesSaveGameExist(Slot, User) ? TEXT("exists") : TEXT("missing"));
 	}
@@ -609,11 +666,12 @@ namespace KBProfileCommands
 		UKBProfileSubsystem* Profile = Resolve(World);
 		if (!Profile || Args.Num() < 2)
 		{
-			UE_LOG(LogKillBugs, Warning, TEXT("Profile.Grant: expected <gold> <materials>"));
+			UE_LOG(LogKillBugs, Warning, TEXT("Profile.Grant: expected <gold> <materials> [medkits]"));
 			return;
 		}
 
-		Profile->AddBankedForDebug(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]));
+		Profile->AddBankedForDebug(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]),
+			Args.Num() >= 3 ? FCString::Atoi(*Args[2]) : 0);
 	}
 
 	/** Re-reads the file, so persistence can be proven without restarting the process. */
@@ -638,9 +696,9 @@ static FAutoConsoleCommandWithWorldAndArgs KBConsoleProfileReset(
 
 static FAutoConsoleCommandWithWorldAndArgs KBConsoleProfileGrant(
 	TEXT("KB.Profile.Grant"),
-	TEXT("KB.Profile.Grant <gold> <materials> - add straight to the BANK. KB.Profile.AddGold and "
-	     "KB.Loot.Give write the run total, which is 0 in the lobby, so this is what funds a shop "
-	     "test."),
+	TEXT("KB.Profile.Grant <gold> <materials> [medkits] - add straight to the BANK. "
+	     "KB.Profile.AddGold and KB.Loot.Give write the run total, which is 0 in the lobby, so "
+	     "this is what funds a shop test. Medkits given here are what the next run carries in."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&KBProfileCommands::Grant));
 
 static FAutoConsoleCommandWithWorldAndArgs KBConsoleProfileReload(

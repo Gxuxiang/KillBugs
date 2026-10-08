@@ -54,6 +54,9 @@ public:
 	/** Server only. Puts one drop in the world. Used by the roll and by KB.Loot.Spawn. */
 	void SpawnDrop(const FVector& Location, EKBItemType Type, int32 Count);
 
+	/** `KB.Backpack.SelfTest`. Lives here because this is what owns the ground drops it drives. */
+	static void ConsoleBackpackSelfTest(const TArray<FString>& Args, UWorld* World);
+
 	/** Server only. Removes every drop. Used by KB.Loot.List's sibling test paths. */
 	void ClearDrops();
 
@@ -102,4 +105,12 @@ private:
 
 	/** Set once the drop cap has been hit, so the warning is said once per run, not per death. */
 	bool bWarnedAboutDropCap = false;
+
+	/**
+	 * Throttles the "backpack is full, left it on the ground" line.
+	 *
+	 * A refusal happens per drop per frame, and a full backpack next to a pile of loot would
+	 * write a line for every one of them every frame. One line a second says the same thing.
+	 */
+	float LastRefusalLogTime = -1000.f;
 };

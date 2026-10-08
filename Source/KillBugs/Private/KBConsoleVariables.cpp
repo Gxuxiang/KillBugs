@@ -15,6 +15,21 @@ TAutoConsoleVariable<float> CVarKBSwarmAudioLog(
 	     "emitter slot."),
 	ECVF_Default);
 
+TAutoConsoleVariable<int32> CVarKBSwarmFlowEnabled(
+	TEXT("KB.Swarm.FlowEnabled"),
+	1,
+	TEXT("1 = bugs route around geometry using the flow field (default), 0 = the field is skipped "
+	     "entirely and the swarm steers exactly as it did before the field existed. The A/B switch "
+	     "for whether routing changed the open-arena feel."),
+	ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarKBSwarmFlowDebug(
+	TEXT("KB.Swarm.FlowDebug"),
+	0,
+	TEXT("1 = draw the flow field: blocked cells as red boxes, the direction field as green "
+	     "arrows, sources as red spheres (default 0). Nothing renders under -nullrhi."),
+	ECVF_Default);
+
 TAutoConsoleVariable<int32> CVarKBPlayerGod(
 	TEXT("KB.Player.God"),
 	0,

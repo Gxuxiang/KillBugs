@@ -48,6 +48,33 @@ extern KILLBUGS_API TAutoConsoleVariable<float> CVarKBSwarmAudioLog;
 extern KILLBUGS_API TAutoConsoleVariable<int32> CVarKBPlayerGod;
 
 /**
+ * Enables the swarm's flow field; 1 = on (default), 0 = off.
+ *
+ * Off means SimulateSwarm behaves exactly as it did before the field existed - not "the field is
+ * empty", but the lookup is skipped entirely. That makes this the A/B switch for the only
+ * question that matters about the cut: did routing around geometry change how the swarm feels in
+ * the open arena? Run a flat-arena lap with it at 0 and at 1 and compare the perf log's sim
+ * column and its routed count.
+ *
+ * A cvar rather than a setting because it is a comparison tool, not a design value, and because
+ * it has to be flippable mid-run from the console.
+ */
+extern KILLBUGS_API TAutoConsoleVariable<int32> CVarKBSwarmFlowEnabled;
+
+/**
+ * Draws the flow field: blocked cells as red boxes, the direction field as green arrows.
+ *
+ * The field is invisible in normal play by design - it only steers bugs that have a wall between
+ * them and their target - so without this there is no way to look at it at all. Default 0.
+ *
+ * Skipped when the app cannot render, so a -nullrhi run does not pay for draws nobody sees;
+ * the cvar-gated log line is the instrument there.
+ *
+ * Usage: KB.Swarm.FlowDebug 1
+ */
+extern KILLBUGS_API TAutoConsoleVariable<int32> CVarKBSwarmFlowDebug;
+
+/**
  * Testing switch: every bug death drops a material.
  *
  * Usage: KB.Loot.ForceDrop 1

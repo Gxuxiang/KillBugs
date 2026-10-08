@@ -74,6 +74,7 @@ public:
 	static void ConsoleExtractSchedule(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleExtractSelfTest(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleRunWipe(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleRunWipeIn(const TArray<FString>& Args, UWorld* World);
 
 protected:
 	/** Monotonic counter feeding AKBPlayerState::KBPlayerIndex. */

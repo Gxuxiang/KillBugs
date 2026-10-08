@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "Loot/KBLootTypes.h"
 #include "KBCharacter.generated.h"
 
 class UCameraComponent;
@@ -46,6 +47,36 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "KillBugs|Debug")
 	void DebugFireManualWeapon(float Distance = 800.f);
+
+	/**
+	 * Test hook: use a medkit, through the same routing the key uses.
+	 *
+	 * Same reason DebugFireManualWeapon exists: a headless run has no keyboard, so without this
+	 * the client-to-server path being verified cannot be exercised at all.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "KillBugs|Debug")
+	void DebugUseMedkit();
+
+	/**
+	 * Test hook: use whatever is in a hotbar slot, through the same routing the number keys use.
+	 *
+	 * Takes the SLOT rather than the item, so a test exercises the slot lookup too - the thing
+	 * that would silently do nothing if the hotbar and the keys ever disagreed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "KillBugs|Debug")
+	void DebugUseHotbarSlot(int32 SlotIndex);
+
+	/** Test hook: drop one of an item, through the same RPC the panel's menu uses. */
+	UFUNCTION(BlueprintCallable, Category = "KillBugs|Debug")
+	void DebugDropItem(EKBItemType Type);
+
+	/** Client to server: use one of this item from the backpack. */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerUseItem(EKBItemType Type);
+
+	/** Client to server: move one out of the backpack and onto the ground. */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerDropItem(EKBItemType Type);
 
 	/**
 	 * Aim direction, owned by the CLIENT and replicated through the server.
@@ -97,6 +128,46 @@ protected:
 	/** Trigger pressed / released. Held-fire is resolved every Tick while the flag is set. */
 	void StartFire(const FInputActionValue& Value);
 	void StopFire(const FInputActionValue& Value);
+
+	/** Use-item key pressed. Goes to RequestUseMedkit - see there. */
+	void UseMedkit(const FInputActionValue& Value);
+
+	// ---- Backpack panel and hotbar ---------------------------------------------------------
+
+	/** B. The panel's own state lives on the controller; this just toggles it. */
+	void ToggleBackpack(const FInputActionValue& Value);
+
+	/** Right mouse. Opens the menu for the row under the cursor, if the panel is open. */
+	void OpenBackpackMenu(const FInputActionValue& Value);
+
+	/**
+	 * The six number keys, one handler each.
+	 *
+	 * Six thin wrappers rather than one handler bound six times: a handler shared by several
+	 * actions cannot tell which one fired without reaching into the input action instance, and
+	 * that kind of cleverness is exactly what fails silently the first time it is refactored.
+	 */
+	void UseHotbarSlot1(const FInputActionValue& Value);
+	void UseHotbarSlot2(const FInputActionValue& Value);
+	void UseHotbarSlot3(const FInputActionValue& Value);
+	void UseHotbarSlot4(const FInputActionValue& Value);
+	void UseHotbarSlot5(const FInputActionValue& Value);
+	void UseHotbarSlot6(const FInputActionValue& Value);
+
+	/**
+	 * The one place "use a medkit" is routed from, for both the key and the debug hook.
+	 *
+	 * A client cannot consume from its own backpack (that state is server-authoritative), so the
+	 * client asks and the authority decides - and the refusal reason has to come back over the
+	 * wire, which is why the heal is not simply run locally and hoped for.
+	 */
+	void RequestUseMedkit();
+
+	/**
+	 * Ask the server to use whatever is in this hotbar slot. Public so a headless test can drive
+	 * it by slot, which is the whole point of having slots.
+	 */
+	void UseHotbarSlot(int32 SlotIndex);
 
 	/** Fires the first manual weapon at the current aim point, if the trigger is held. */
 	void TickManualWeapon();

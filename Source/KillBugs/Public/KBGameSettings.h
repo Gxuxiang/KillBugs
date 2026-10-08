@@ -252,8 +252,29 @@ public:
 	float BasePickupRadius = 90.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "搜刮|拾取",
-		meta = (ToolTip = "药包回多少血。\n\n回血上限是玩家的最大血量，超出的部分不会浪费在溢出上（Heal 会自己钳）。\n\n注意：【满血时踩到药包不会捡】，它会留在地上——所以这个值调大不会变成“走路时把包全吃光”。", ClampMin = "1.0", UIMax = "500.0"))
+		meta = (ToolTip = "药包用一次回多少血。\n\n回血上限是玩家的最大血量，超出的部分不会浪费在溢出上（Heal 会自己钳）。\n\n注意：药包【不再是踩到就回血】，它进了背包，由按键使用；满血时使用会被拒绝（不消耗）。", ClampMin = "1.0", UIMax = "500.0"))
 	float MedkitHealAmount = 40.f;
+
+	// =====================================================================================
+	// 背包
+	// =====================================================================================
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|背包",
+		meta = (ToolTip = "背包的重量上限。\n\n材料按 MaterialUnitWeight 计重、药包按 MedkitWeight 计重，加起来不能超过这个数。\n\n标尺参照：实测一局能搜出约 225 个材料，所以默认值留了余量；而场上掉落上限是 MaxDrops，\n一场饱和的战场光地上的东西就接近上限——所以它也不是永远够用的摆设。", ClampMin = "0", UIMax = "5000"))
+	int32 BackpackCapacity = 300;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|背包",
+		meta = (ToolTip = "每个材料占多少重量。", ClampMin = "0", UIMax = "100"))
+	int32 MaterialUnitWeight = 1;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|背包",
+		meta = (ToolTip = "每个药包占多少重量。\n\n默认 25 = “一个药包约等于 25 个材料”，也就是 225 材料 + 3 药包正好装满 300。\n这就是搜刮的取舍：多带一个药包，就得少带一把材料。", ClampMin = "0", UIMax = "500"))
+	int32 MedkitWeight = 25;
+
+	UPROPERTY(Config, EditAnywhere, Category = "搜刮|背包",
+		meta = (ToolTip = "从背包里丢出去的东西落在离玩家多远的地方（厘米）。\n\n【必须大于玩家能加成的最大拾取半径】，否则丢在脚下、下一帧就被自己捡回来，\n玩家看到的是“丢弃没生效”。拾取半径 BasePickupRadius=90，卡牌「远见」能乘到 135。",
+			ClampMin = "0.0", UIMax = "1000.0"))
+	float DroppedItemDistance = 160.f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "搜刮|掉落",
 		meta = (ToolTip = "场上同时最多存在多少个掉落物。到顶之后不再掉新的。\n\n【不做“回收最旧的”】：在玩家眼皮底下、还够得着的地方把战利品删掉，比不掉新的更糟。", ClampMin = "8", UIMax = "1024"))
@@ -346,6 +367,16 @@ public:
 		meta = (ToolTip = "竞技场半边长（厘米）。\n\n必须和 Tools/kb_setup_arena.py 生成的地图一致，改这里要同时改脚本里的 FLOOR_HALF_SIZE 并重新生成地图。",
 			ClampMin = "500.0", UIMax = "20000.0"))
 	float ArenaHalfExtent = 5500.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "虫群",
+		meta = (ToolTip = "流场网格的格边长（厘米）。\n\n要和迷宫的走廊宽度对齐：格子比走廊宽，虫子就找不到路。\n代价是平方关系——5500 的半边长配 100 的格子是 1.1 万个，配 50 就是 4.8 万个。",
+			ClampMin = "20.0", UIMax = "500.0"))
+	float FlowCellSize = 100.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "虫群",
+		meta = (ToolTip = "流场重建的间隔（秒）。\n\n玩家以 700/秒移动时 0.1 秒走 70 厘米，不到一格，所以起点格永远新鲜。\n调大省 CPU，但玩家绕到墙另一边之后，虫子会晚一点才改道。",
+			ClampMin = "0.02", UIMax = "2.0"))
+	float FlowRebuildInterval = 0.1f;
 
 	// =====================================================================================
 	// 玩家

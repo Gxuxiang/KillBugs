@@ -906,6 +906,46 @@ void AKBGameMode::ConsoleRunWipe(const TArray<FString>& Args, UWorld* World)
 	Mode->EndRun(EKBRunResult::WipedOut);
 }
 
+void AKBGameMode::ConsoleRunWipeIn(const TArray<FString>& Args, UWorld* World)
+{
+	AKBGameMode* Mode = KBExtractCommands::ResolveGameMode(World);
+	if (!Mode || !World)
+	{
+		return;
+	}
+
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 3.f;
+
+	// The delayed sibling of KB.Run.Wipe, and it exists because of an ordering trap that makes
+	// the immediate one lie in a headless test.
+	//
+	// -ExecCmds runs in the first frame, and AKBPlayerController::TryBindToRunState runs from
+	// Tick - so a wipe in frame 0 lands BEFORE the controller is listening. RunResult latches and
+	// broadcasts once, so the machine that missed it never banks, and the log says nothing at all
+	// about why. A wipe that arrives a few seconds in behaves like the real one.
+	UE_LOG(LogKillBugs, Display, TEXT("Run.WipeIn: wiping in %.1fs"), Delay);
+
+	TWeakObjectPtr<AKBGameMode> WeakMode(Mode);
+	TSharedPtr<float> Elapsed = MakeShared<float>(0.f);
+
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([WeakMode, Elapsed, Delay](float DeltaSeconds) -> bool
+		{
+			*Elapsed += DeltaSeconds;
+			if (*Elapsed < Delay)
+			{
+				return true;
+			}
+
+			if (AKBGameMode* Live = WeakMode.Get())
+			{
+				Live->EndRun(EKBRunResult::WipedOut);
+			}
+
+			return false;
+		}));
+}
+
 void AKBGameMode::BeginCardDraft(int32 ForWaveIndex)
 {
 	AKBGameState* RunState = GetGameState<AKBGameState>();
@@ -1250,6 +1290,13 @@ static FAutoConsoleCommandWithWorldAndArgs KBConsoleRunWipe(
 	TEXT("KB.Run.Wipe - end the run as a team wipe, without downing anybody. For reaching the "
 	     "wipe branch (materials are lost, not banked) in a headless test."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleRunWipe));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleRunWipeIn(
+	TEXT("KB.Run.WipeIn"),
+	TEXT("KB.Run.WipeIn [seconds] - KB.Run.Wipe, delayed (default 3s). Use this one in a headless "
+	     "test: -ExecCmds runs in frame 0, before the player controller has bound to the run "
+	     "state, so an immediate wipe is broadcast to nobody and the machine never banks."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBGameMode::ConsoleRunWipeIn));
 
 static FAutoConsoleCommandWithWorldAndArgs KBConsoleExtractSelfTest(
 	TEXT("KB.Extract.SelfTest"),

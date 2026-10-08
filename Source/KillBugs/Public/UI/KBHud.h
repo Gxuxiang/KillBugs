@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/HUD.h"
+#include "UI/KBBackpackModel.h"
 #include "KBHud.generated.h"
 
 class UKBCardDefinition;
@@ -35,6 +36,36 @@ public:
 
 	/** Index of the card under the given screen position, or INDEX_NONE. */
 	int32 HitTestCard(const FVector2D& ScreenPosition) const;
+
+	// ---- Backpack panel --------------------------------------------------------------------
+
+	/**
+	 * Index of the backpack row under the given screen position, or INDEX_NONE.
+	 *
+	 * Empty while the panel is closed, which is what makes the controller's hit tests fail
+	 * harmlessly when B has not been pressed.
+	 */
+	int32 HitTestBackpackRow(const FVector2D& ScreenPosition) const;
+
+	/**
+	 * Which menu entry is under the given position, or None.
+	 *
+	 * The entries are ordered by the same array the drawing walks, so the entry that is drawn
+	 * and the entry that is clicked cannot disagree - the reason the rows are built once.
+	 */
+	EKBBackpackAction HitTestBackpackMenu(const FVector2D& ScreenPosition) const;
+
+	/** The row that was drawn at this index last frame, or null. */
+	const FKBBackpackRow* GetBackpackRow(int32 Index) const;
+
+	/**
+	 * Index of the hotbar slot under the given screen position, or INDEX_NONE.
+	 *
+	 * Only ever consulted while the backpack panel is open. The bar itself is always drawn, and
+	 * a bar that ate left-clicks would turn "shoot at something at the bottom of the screen" into
+	 * "select slot 3".
+	 */
+	int32 HitTestHotbarSlot(const FVector2D& ScreenPosition) const;
 
 protected:
 	/** Segmented bar across the top showing where the wave cycle is. */
@@ -102,7 +133,30 @@ protected:
 	void DrawRunSummary();
 	void DrawCard(const UKBCardDefinition& Card, const FBox2D& Rect, bool bHovered, int32 Index);
 
+	/** The carried-items panel on the right. Only drawn while the controller says it is open. */
+	void DrawBackpackPanel();
+
+	/** The consumable bar along the bottom. Always drawn - it is a key reference, not a mode. */
+	void DrawHotbar();
+
 	TArray<FBox2D> CardRects;
+
+	/**
+	 * The backpack panel's rows, and the rectangles they were drawn at.
+	 *
+	 * Rebuilt every frame and read by both the drawing and the hit tests, the contract the
+	 * lobby's shop rows established. Cleared with the rest at the top of DrawHUD, which is also
+	 * what makes the panel's hit tests miss during the end-of-run summary.
+	 */
+	TArray<FKBBackpackRow> BackpackRows;
+	TArray<FBox2D> BackpackRowRects;
+
+	/** Menu entries in draw order, parallel to BackpackMenuRects. Only filled when one is open. */
+	TArray<EKBBackpackAction> BackpackMenuActions;
+	TArray<FBox2D> BackpackMenuRects;
+
+	/** Where the hotbar slots were drawn, in slot order. Rebuilt with the rest each frame. */
+	TArray<FBox2D> HotbarSlotRects;
 
 	// --- Layout ---------------------------------------------------------------------------
 

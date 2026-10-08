@@ -31,6 +31,15 @@ public:
 	virtual void BeginPlay() override;
 	virtual void SetupInputComponent() override;
 
+	/**
+	 * Only overridden to feed the host-address field.
+	 *
+	 * Enhanced Input has no text-entry concept, and the lobby has no UMG widget to type into -
+	 * the whole screen is Canvas. So the keystrokes are taken here, while the HUD says it is
+	 * typing, and passed through untouched at every other moment.
+	 */
+	virtual bool InputKey(const FInputKeyEventArgs& EventArgs) override;
+
 	/** Server RPC. Starts the run; the GameMode ignores this unless the caller is the host. */
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerRequestStart();
@@ -65,6 +74,12 @@ private:
 
 	/** Routes a click at a shop row. Only reached while the shop panel is open. */
 	void HandleShopClick(class AKBLobbyHud* LobbyHud);
+
+	/** Turns what was typed into a connection, or into a reason it cannot be one. */
+	void CommitManualJoin(class AKBLobbyHud* LobbyHud);
+
+	/** Puts this machine's address on the clipboard, so it can be sent to the other player. */
+	void CopyLocalAddress(class AKBLobbyHud* LobbyHud);
 
 	/** The cursor, or the origin when the mouse is not in the viewport. */
 	FVector2D CursorPosition() const;

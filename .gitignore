@@ -5,6 +5,12 @@ DerivedDataCache/
 Intermediate/
 Saved/
 
+# Build/Windows/FileOpenOrder: the cooker writes these on every cook and they describe the order
+# that cook happened to walk files in. Regenerated locally every time, so they are churn, not
+# state. Narrow on purpose - Unreal convention allows real build scripts under Build/, and a
+# blanket Build/ would hide one if this project ever grows one.
+Build/Windows/FileOpenOrder/
+
 # Visual Studio / IDE
 .vs/
 *.sln

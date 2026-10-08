@@ -29,6 +29,10 @@ enum class EKBLobbyButton : uint8
 	Leave,
 	/** Show the shop, or go back to the lobby proper. */
 	Shop,
+	/** Start typing a host address, for the routers whose broadcast never arrives. */
+	ManualJoin,
+	/** Put this machine's own address on the clipboard, ready to send to the other player. */
+	CopyAddress,
 
 	Count,
 };
@@ -77,6 +81,31 @@ public:
 	const FString& GetShopMessage() const { return ShopMessage; }
 	void SetShopMessage(const FString& InMessage) { ShopMessage = InMessage; }
 
+	// ---- Typing a host address -------------------------------------------------------------
+	//
+	// The state lives here rather than on the controller, the same way bShopOpen does: this
+	// class already owns what the lobby is showing, and the controller is the thing that drives
+	// it. What makes this one different is that the CONTROLLER has to route keystrokes into it,
+	// which is why IsTypingAddress exists for it to ask.
+
+	bool IsTypingAddress() const { return bTypingAddress; }
+	void BeginAddressEntry();
+	void CancelAddressEntry();
+	void AppendAddressChar(TCHAR Character);
+	void BackspaceAddress();
+
+	/** Appends the clipboard, filtered to what an address can contain. */
+	void PasteAddressFromClipboard();
+
+	/** The typed text, and stops typing. The caller owns it from here. */
+	FString TakeAddressBuffer();
+
+	/** The address to show and to copy: the best candidate, or empty. */
+	FString GetPreferredLocalAddress() const;
+
+	/** All of them, best first - drawn so a wrong guess can be corrected. */
+	const TArray<FString>& GetLocalAddresses() const { return LocalAddresses; }
+
 private:
 	/** The session subsystem, or null during teardown. */
 	UKBSessionSubsystem* GetSessions() const;
@@ -96,6 +125,18 @@ private:
 	 */
 	void DrawShop(const FBox2D& Panel);
 	void DrawPlayerList(const FBox2D& Panel);
+
+	/**
+	 * This machine's address, and the way to join one by hand.
+	 *
+	 * It exists because discovery is not always available: OnlineSubsystemNull finds rooms with a
+	 * UDP broadcast, and plenty of routers drop broadcast between two wireless clients while
+	 * forwarding unicast perfectly - so the list stays empty while a direct connection works.
+	 * The verified symptom was exactly that: KB.Lobby.Join to the same address connected
+	 * immediately. This gives that path a face, so it does not need a console.
+	 */
+	void DrawManualJoin(const FBox2D& Panel);
+
 	void DrawButtons(const FBox2D& Panel);
 	void DrawStatusLine(const FBox2D& Panel);
 
@@ -145,6 +186,20 @@ private:
 
 	/** Why the last shop click was refused. Drawn on the status line the lobby already has. */
 	FString ShopMessage;
+
+	/** True while the player is typing a host address into the lobby. */
+	bool bTypingAddress = false;
+
+	/** What they have typed so far. Only meaningful while bTypingAddress. */
+	FString AddressBuffer;
+
+	/**
+	 * This machine's own addresses, resolved once in BeginPlay.
+	 *
+	 * Not per frame: the answer cannot change without the adapter changing, and asking the
+	 * socket subsystem every frame to draw a line that never moves would be silly.
+	 */
+	TArray<FString> LocalAddresses;
 
 	/** Cursor position for this frame, read once so every hit test agrees. */
 	FVector2D MousePosition = FVector2D::ZeroVector;

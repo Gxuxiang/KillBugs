@@ -3,6 +3,11 @@
 #include "Combat/KBStatSheetComponent.h"
 #include "Core/KBPlayerState.h"
 #include "Data/KBEnemyArchetype.h"
+#include "Components/StaticMeshComponent.h"
+#include "Containers/Ticker.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/OverlapResult.h"
+#include "Engine/StaticMeshActor.h"
 #include "EngineUtils.h"
 #include "KBConsoleVariables.h"
 #include "KBGameSettings.h"
@@ -10,6 +15,8 @@
 #include "Loot/KBLootDirector.h"
 #include "GameFramework/PlayerController.h"
 #include "KBStats.h"
+#include "Math/RandomStream.h"
+#include "Misc/App.h"
 #include "Net/UnrealNetwork.h"
 #include "Swarm/KBGoreComponent.h"
 #include "Swarm/KBEnemyVisualizerComponent.h"
@@ -19,6 +26,7 @@
 DEFINE_STAT(STAT_KB_SwarmSim);
 DEFINE_STAT(STAT_KB_SwarmNetSync);
 DEFINE_STAT(STAT_KB_SwarmCount);
+DEFINE_STAT(STAT_KB_SwarmFlow);
 
 namespace
 {
@@ -84,6 +92,17 @@ void AKBEnemyDirector::BeginPlay()
 	Super::BeginPlay();
 
 	Grid.Reset(GridCellSize, FVector::ZeroVector, KBSettings().ArenaHalfExtent);
+
+	// The flow field's rectangle comes from the same arena size as the grid's, so the two can
+	// never disagree about where the arena is.
+	FlowField.Reset(KBSettings().FlowCellSize, FVector::ZeroVector, KBSettings().ArenaHalfExtent);
+
+	// Server only. Clients render the replicated array and never simulate, so baking there would
+	// be a few thousand collision queries spent on an answer nobody asks for.
+	if (HasAuthority())
+	{
+		BakeFlowObstaclesNow();
+	}
 }
 
 void AKBEnemyDirector::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -121,6 +140,8 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 	}
 
 	const double StartSeconds = FPlatformTime::Seconds();
+	RefreshFlowField(DeltaSeconds);
+	const double AfterFlowSeconds = FPlatformTime::Seconds();
 	SimulateSwarm(DeltaSeconds);
 	const double AfterSimSeconds = FPlatformTime::Seconds();
 	SyncReplication(DeltaSeconds);
@@ -129,7 +150,8 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 	const float PerfLogInterval = CVarKBSwarmPerfLog.GetValueOnGameThread();
 	if (PerfLogInterval > 0.f)
 	{
-		PerfSimSeconds += AfterSimSeconds - StartSeconds;
+		PerfFlowSeconds += AfterFlowSeconds - StartSeconds;
+		PerfSimSeconds += AfterSimSeconds - AfterFlowSeconds;
 		PerfNetSeconds += FPlatformTime::Seconds() - AfterSimSeconds;
 		++PerfFrames;
 		PerfElapsed += DeltaSeconds;
@@ -173,12 +195,20 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 			}
 
 			const double Frames = FMath::Max(PerfFrames, 1);
+
+			// "routed" is the number that says whether the flow field is doing anything at all.
+			// On the flat arena it should read 0: nothing blocks a sight line, so no bug ever
+			// takes the field branch. A number that climbs in an arena with no walls in it means
+			// the sight-line test is wrong, which is otherwise invisible.
 			UE_LOG(LogKillBugs, Display,
-				TEXT("Swarm perf | %d bugs | sim %.3f ms | net %.3f ms | health %.0f%% | ")
-				TEXT("player (%s) | %.0f fps"),
+				TEXT("Swarm perf | %d bugs | sim %.3f ms | net %.3f ms | flow %.3f ms (%d blocked, %d routed) | ")
+				TEXT("health %.0f%% | player (%s) | %.0f fps"),
 				Sim.Num(),
 				PerfSimSeconds / Frames * 1000.0,
 				PerfNetSeconds / Frames * 1000.0,
+				PerfFlowSeconds / Frames * 1000.0,
+				FlowField.GetBlockedCellCount(),
+				PerfFlowRouted,
 				HealthPercent,
 				bHasPlayerLocation
 					? *FString::Printf(TEXT("%.0f,%.0f,%.0f"),
@@ -188,10 +218,15 @@ void AKBEnemyDirector::Tick(float DeltaSeconds)
 
 			PerfSimSeconds = 0.0;
 			PerfNetSeconds = 0.0;
+			PerfFlowSeconds = 0.0;
+			PerfFlowRouted = 0;
 			PerfFrames = 0;
 			PerfElapsed = 0.f;
 		}
 	}
+
+	// Last, so none of the above is charged for draws nobody asked for.
+	DrawFlowFieldDebug();
 }
 
 void AKBEnemyDirector::SimulateSwarm(float DeltaSeconds)
@@ -209,6 +244,11 @@ void AKBEnemyDirector::SimulateSwarm(float DeltaSeconds)
 	Grid.Rebuild(Sim);
 
 	const float Now = World->GetTimeSeconds();
+
+	// Read once per pass rather than per bug: it is the same answer 600 times, and a console
+	// variable lookup is not free. When it is off, nothing below ever consults the field, which
+	// makes this the exact A/B against the pre-flow-field behaviour.
+	const bool bFlowEnabled = CVarKBSwarmFlowEnabled.GetValueOnGameThread() != 0 && FlowField.IsSolved();
 
 	for (int32 Index = 0; Index < Sim.Num(); ++Index)
 	{
@@ -247,11 +287,25 @@ void AKBEnemyDirector::SimulateSwarm(float DeltaSeconds)
 			// No living player to chase - they are all down, respawning, or have not joined
 			// yet. Drift toward the arena centre instead of standing still, so the swarm
 			// keeps converging and does not freeze in its spawn ring.
+			//
+			// The field's sources fall back to that same centre when there are no players
+			// (see CollectFlowSources), so the drift asks the field the same question and gets
+			// a wall-aware answer instead of walking into geometry.
 			FVector ToCentre = -Enemy.Location;
 			ToCentre.Z = 0.f;
 			if (ToCentre.SizeSquared() > FMath::Square(200.f))
 			{
-				DesiredVelocity = ToCentre.GetSafeNormal() * Speed * 0.5f;
+				FVector FlowDirection;
+				if (bFlowEnabled
+					&& !FlowField.LineOfSightIsClear(Enemy.Location, FVector::ZeroVector)
+					&& FlowField.GetDirection(Enemy.Location, FlowDirection))
+				{
+					DesiredVelocity = FlowDirection * Speed * 0.5f;
+				}
+				else
+				{
+					DesiredVelocity = ToCentre.GetSafeNormal() * Speed * 0.5f;
+				}
 			}
 		}
 		else
@@ -264,7 +318,27 @@ void AKBEnemyDirector::SimulateSwarm(float DeltaSeconds)
 			{
 				const FVector Direction = ToTarget / Distance;
 
-				if (Archetype->Steering == EKBSteeringBehavior::Orbit)
+				// The flow field is consulted ONLY when a wall actually stands between this bug
+				// and its target, and that gate is the whole reason the open-field game is
+				// untouched: no blocked cell is crossed there, so every bug takes exactly the
+				// path it always took, down to the last bit. Sampling the field unconditionally
+				// would quantise every direction in the game to eight cell directions in order to
+				// solve a problem that only exists behind geometry.
+				FVector FlowDirection;
+				const bool bUseFlow = bFlowEnabled
+					&& !FlowField.LineOfSightIsClear(Enemy.Location, Target->GetActorLocation())
+					&& FlowField.GetDirection(Enemy.Location, FlowDirection);
+
+				if (bUseFlow)
+				{
+					// The field replaces the orbit tangent as well as the seek. Curving in is a
+					// clear-line flourish; behind a wall the bug has one job, and adding a
+					// tangential component to a detour would drive it back into the wall. Orbit
+					// resumes the moment the line clears.
+					DesiredVelocity = FlowDirection * Speed;
+					++PerfFlowRouted;
+				}
+				else if (Archetype->Steering == EKBSteeringBehavior::Orbit)
 				{
 					// ALWAYS close in. The radial component never reverses sign, so the bug can
 					// never settle into a stable orbit - it just takes a curving path in.
@@ -329,6 +403,251 @@ void AKBEnemyDirector::SimulateSwarm(float DeltaSeconds)
 		Enemy.Location.Y = FMath::Clamp(Enemy.Location.Y, -Limit, Limit);
 		Enemy.Location.Z = 0.f;
 	}
+}
+
+// ---------------------------------------------------------------------------------------
+// Flow field
+// ---------------------------------------------------------------------------------------
+
+void AKBEnemyDirector::InvalidateFlowObstacles()
+{
+	FlowField.InvalidateObstacles();
+}
+
+FIntPoint AKBEnemyDirector::GetFlowCellFor(const FVector& Location) const
+{
+	int32 X = INDEX_NONE;
+	int32 Y = INDEX_NONE;
+	FlowField.WorldToCell(Location, X, Y);
+	return FIntPoint(X, Y);
+}
+
+int32 AKBEnemyDirector::BakeFlowObstaclesNow()
+{
+	const double StartSeconds = FPlatformTime::Seconds();
+	const int32 BlockedCells = FlowField.BakeObstacles(GetWorld(), FlowProbeHeight);
+	const double BakeMilliseconds = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
+
+	CollectFlowSources();
+	FlowField.Rebuild();
+	FlowRebuildAccumulator = 0.f;
+
+	// The duration is logged rather than assumed: this is a few thousand collision queries, and
+	// whether that is 20 ms or 200 ms decides whether the maze cut needs the AABB short-cut.
+	UE_LOG(LogKillBugs, Display,
+		TEXT("Flow field: baked %d blocked cell(s) of %dx%d at %.0f cm in %.1f ms"),
+		BlockedCells, FlowField.GetCellsX(), FlowField.GetCellsY(), FlowField.GetCellSize(),
+		BakeMilliseconds);
+
+	return BlockedCells;
+}
+
+void AKBEnemyDirector::RebuildFlowFieldNow()
+{
+	CollectFlowSources();
+	FlowField.Rebuild();
+	FlowRebuildAccumulator = 0.f;
+}
+
+void AKBEnemyDirector::CollectFlowSources()
+{
+	FlowSourceScratch.Reset();
+
+	const UWorld* World = GetWorld();
+	if (World)
+	{
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			const APlayerController* PlayerController = It->Get();
+			const APawn* Pawn = PlayerController ? PlayerController->GetPawn() : nullptr;
+			if (!IsValid(Pawn))
+			{
+				continue;
+			}
+
+			// Deliberately the same rule SelectTargetFor uses - downed players included. The
+			// field stands in for that targeting on the far side of a wall, so if the two
+			// disagreed about which players count, a bug would be routed toward one player while
+			// walking at another.
+			FlowSourceScratch.Add(Pawn->GetActorLocation());
+		}
+	}
+
+	if (FlowSourceScratch.Num() == 0)
+	{
+		// Nobody to chase. The arena centre is the same thing the no-target steering drifts
+		// toward, so asking the field about it keeps that drift wall-aware too - and it means
+		// the source set is never empty, which would make the whole field unreachable.
+		FlowSourceScratch.Add(FVector::ZeroVector);
+	}
+
+	FlowField.SetSources(FlowSourceScratch);
+}
+
+void AKBEnemyDirector::RefreshFlowField(float DeltaSeconds)
+{
+	SCOPE_CYCLE_COUNTER(STAT_KB_SwarmFlow);
+
+	if (!FlowField.IsValid())
+	{
+		return;
+	}
+
+	if (FlowField.NeedsObstacleBake())
+	{
+		// BakeObstaclesNow re-solves as well and resets the accumulator, so this returns.
+		BakeFlowObstaclesNow();
+		return;
+	}
+
+	FlowRebuildAccumulator += DeltaSeconds;
+	const float Interval = FMath::Max(KBSettings().FlowRebuildInterval, 0.02f);
+	if (FlowRebuildAccumulator < Interval)
+	{
+		return;
+	}
+
+	// A fixed cadence rather than "re-solve when a player changes cell". At 700 cm/s a player
+	// crosses a 100 cm cell every 0.14 s, so on any interval at or below that the sources are
+	// already current to within a cell; and a fixed clock stays bounded and obvious with four
+	// players, where a per-player invalidation would need arguing about.
+	//
+	// Note this clock is independent of the bugs' 0.4 s think stagger. A bug can hold a target
+	// that the field has since stopped pointing at - it still converges, because both the target
+	// and the field lead to a player, just not always the same one.
+	CollectFlowSources();
+	FlowField.Rebuild();
+	FlowRebuildAccumulator = 0.f;
+}
+
+AActor* AKBEnemyDirector::SpawnFlowTestWall(const FVector& Centre, const FVector& Size)
+{
+	UWorld* World = GetWorld();
+	if (!World || !HasAuthority())
+	{
+		return nullptr;
+	}
+
+	// The same cube the arena itself is built from (Tools/kb_setup_arena.py), so a test wall
+	// behaves exactly like the ones the map ships with - including being static-blocking.
+	UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
+		nullptr, TEXT("/Game/LevelPrototyping/Meshes/SM_Cube.SM_Cube"));
+	if (!CubeMesh)
+	{
+		UE_LOG(LogKillBugs, Warning, TEXT("Flow field: SM_Cube could not be loaded - no test wall"));
+		return nullptr;
+	}
+
+	FActorSpawnParameters SpawnParameters;
+	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AStaticMeshActor* Wall = World->SpawnActor<AStaticMeshActor>(
+		AStaticMeshActor::StaticClass(), FTransform(Centre), SpawnParameters);
+	if (!Wall)
+	{
+		return nullptr;
+	}
+
+	// Movable, and in this order. A Static actor cannot have its mesh set or its scale changed
+	// after spawn - the engine asserts rather than silently ignoring it. Mobility does not stop
+	// it blocking WorldStatic, which is the only thing the bake asks of it.
+	Wall->SetMobility(EComponentMobility::Movable);
+
+	UStaticMeshComponent* MeshComponent = Wall->GetStaticMeshComponent();
+	MeshComponent->SetMobility(EComponentMobility::Movable);
+	MeshComponent->SetStaticMesh(CubeMesh);
+	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	MeshComponent->SetCollisionProfileName(TEXT("BlockAll"));
+
+	// Scale about the mesh's BOUNDS, not about its pivot, and then move it so the scaled bounds
+	// are centred on Centre.
+	//
+	// This is the same trap the arena's own walls fell into (see scale_to_size in
+	// Tools/kb_setup_arena.py): SM_Cube's pivot sits on its minimum corner, so scaling grows the
+	// cube in +X/+Y/+Z only and an actor placed at the centre you wanted ends up half a cube out
+	// and half a cube high. A test wall that is not where it claims to be would make the routing
+	// test lie in whichever direction the error happened to point.
+	const FBoxSphereBounds MeshBounds = CubeMesh->GetBounds();
+	const FVector MeshSize = (MeshBounds.BoxExtent * 2.f).ComponentMax(FVector(KINDA_SMALL_NUMBER));
+	const FVector NewScale = Size / MeshSize;
+
+	Wall->SetActorScale3D(NewScale);
+	Wall->SetActorLocation(Centre - NewScale * MeshBounds.Origin);
+
+	FlowTestWalls.Add(Wall);
+	return Wall;
+}
+
+void AKBEnemyDirector::DestroyFlowTestWalls()
+{
+	for (const TObjectPtr<AActor>& Wall : FlowTestWalls)
+	{
+		if (IsValid(Wall))
+		{
+			Wall->Destroy();
+		}
+	}
+
+	FlowTestWalls.Reset();
+}
+
+void AKBEnemyDirector::DrawFlowFieldDebug() const
+{
+#if ENABLE_DRAW_DEBUG
+	if (CVarKBSwarmFlowDebug.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+
+	// -nullrhi draws nothing, and the loops below are not free. The cvar-gated log line is the
+	// instrument in a headless run; this one is for a human in a window.
+	if (!FApp::CanEverRender())
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	if (!World || !FlowField.IsValid() || !FlowField.IsSolved())
+	{
+		return;
+	}
+
+	const float CellSize = FlowField.GetCellSize();
+	const float CellHalf = CellSize * 0.5f;
+
+	// Blocked cells. A maze has thousands, so past a couple of thousand the draw is thinned
+	// rather than dropped: seeing the shape at all is the point, and the stride keeps the
+	// frame cost flat.
+	const bool bThin = FlowField.GetBlockedCellCount() > 2000;
+	int32 Seen = 0;
+	FlowField.ForEachBlockedCell([&](int32 X, int32 Y)
+	{
+		++Seen;
+		if (bThin && (Seen % 4) != 0)
+		{
+			return;
+		}
+
+		const FVector Centre = FlowField.GetCellCentre(X, Y) + FVector(0.f, 0.f, 30.f);
+		DrawDebugBox(World, Centre, FVector(CellHalf, CellHalf, 10.f), FColor(200, 40, 40),
+			false, -1.f, 0, 2.f);
+	});
+
+	// The direction field, on a lattice. Sampling every cell would be 12,000 arrows of which
+	// most say the same thing as their neighbour.
+	FlowField.ForEachDirectionSample(4, [&](const FVector& CellCentre, const FVector& Direction)
+	{
+		const FVector Start = CellCentre + FVector(0.f, 0.f, 30.f);
+		DrawDebugLine(World, Start, Start + Direction * CellSize * 3.f, FColor(40, 220, 80),
+			false, -1.f, 0, 2.f);
+	});
+
+	for (const FVector& Source : FlowField.GetSources())
+	{
+		DrawDebugSphere(World, Source + FVector(0.f, 0.f, 40.f), 60.f, 12, FColor(255, 80, 80),
+			false, -1.f, 0, 3.f);
+	}
+#endif // ENABLE_DRAW_DEBUG
 }
 
 void AKBEnemyDirector::SyncReplication(float DeltaSeconds)
@@ -1023,3 +1342,642 @@ static FAutoConsoleCommandWithWorldAndArgs KBConsoleSwarmCull(
 	     "than KB.Swarm.Kill when the number is large, and the way to clear a field before "
 	     "testing something other than the swarm."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleCullSwarm));
+
+// ---------------------------------------------------------------------------------------
+// Console commands - the flow field.
+// ---------------------------------------------------------------------------------------
+
+namespace KBFlowCommands
+{
+	/** Moves every player's pawn, teleporting so the movement component follows. */
+	void MoveEveryPlayerTo(UWorld* World, const FVector& Location)
+	{
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			APlayerController* PlayerController = It->Get();
+			if (APawn* Pawn = PlayerController ? PlayerController->GetPawn() : nullptr)
+			{
+				Pawn->SetActorLocation(Location, false, nullptr, ETeleportType::TeleportPhysics);
+			}
+		}
+	}
+
+	/**
+	 * TAutoConsoleVariable has no typed setter; the IConsoleVariable interface it forwards to
+	 * takes a string. ECVF_SetByConsole outranks ECVF_SetByCode, so this sticks.
+	 */
+	void SetIntCVar(TAutoConsoleVariable<int32>& CVar, int32 Value)
+	{
+		CVar->Set(*FString::FromInt(Value), ECVF_SetByConsole);
+	}
+
+	/** Where the swarm is heading, for the "did they arrive" half of the routing test. */
+	FVector FirstPlayerLocation(UWorld* World)
+	{
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			const APlayerController* PlayerController = It->Get();
+			const APawn* Pawn = PlayerController ? PlayerController->GetPawn() : nullptr;
+			if (IsValid(Pawn))
+			{
+				return Pawn->GetActorLocation();
+			}
+		}
+
+		return FVector::ZeroVector;
+	}
+
+	/**
+	 * Walks the flow field through its whole chain on a timer, logging what each step proves.
+	 *
+	 * -ExecCmds fire once, in one frame, so "spawn 30 bugs and see where they are fifteen seconds
+	 * later" cannot be expressed on a command line. Same problem as the extraction self test, and
+	 * the same answer: a ticker.
+	 *
+	 * The geometry is INJECTED rather than spawned for the routing step, because a wall of exactly
+	 * three cells with a gap of exactly three rows cannot be built out of a scaled cube - and the
+	 * point of that step is the solver, not the trace. Injection proves the BFS, the gradient, the
+	 * sight-line predicate and the steering override. It proves NOTHING about the bake, which is
+	 * why the last step spawns a real cube and re-bakes: that is the end-to-end one, and it is
+	 * also exactly the maze's scenario, since a maze's geometry appears at runtime.
+	 *
+	 * Kept short on purpose. Warmup is 15 s and this must finish inside it, or the wave spawner
+	 * starts adding bugs of its own mid-measurement.
+	 */
+	struct FSelfTest
+	{
+		TWeakObjectPtr<AKBEnemyDirector> Director;
+		TWeakObjectPtr<UWorld> World;
+
+		float Elapsed = 0.f;
+		int32 Step = 0;
+
+		float RunStartTime = 0.f;
+		int32 WallCentreColumn = INDEX_NONE;
+		int32 GapRowFirst = INDEX_NONE;
+		int32 GapRowLast = INDEX_NONE;
+		int32 SpawnedBugs = 0;
+		int32 Reached = 0;
+		int32 Violations = 0;
+
+		/**
+		 * Bugs SEEN on the far side at any point, keyed by StableId.
+		 *
+		 * "Arrived" is the wrong question: the player's auto weapon fires the moment the test
+		 * starts and the bullets do not collide with the world, so the subjects are being shot
+		 * through the wall as they come round it. A bug that entered the player's half already
+		 * proved it was routed, and no later death takes that away.
+		 */
+		TSet<int32> CrossedIds;
+
+		/**
+		 * How they got there. "Crossed" alone is too weak a claim, because bugs have no
+		 * collision: a bug walking straight through the injected wall would register as a
+		 * crossing just the same. These two say which side of that line each bug actually used.
+		 */
+		TSet<int32> ViaGapIds;       // ever inside the doorway: the wall's columns, in the gap rows
+		TSet<int32> ThroughWallIds;  // ever a full cell deep in the wall's middle column, outside the gap
+
+		bool bGodModeSaved = false;
+		int32 SavedGodMode = 0;
+
+		bool Advance(float DeltaSeconds);
+		void ScanBugs();
+		void Restore();
+	};
+
+	void FSelfTest::ScanBugs()
+	{
+		Reached = 0;
+		Violations = 0;
+
+		AKBEnemyDirector* Dir = Director.Get();
+		UWorld* LiveWorld = World.Get();
+		if (!Dir || !LiveWorld)
+		{
+			return;
+		}
+
+		const FVector TargetLocation = FirstPlayerLocation(LiveWorld);
+		for (const FKBEnemySim& Enemy : Dir->GetSimView())
+		{
+			if (FVector::DistSquared2D(Enemy.Location, TargetLocation) <= FMath::Square(300.f))
+			{
+				++Reached;
+			}
+
+			// A violation is a bug a full cell deep inside the wall's middle column. Clipping the
+			// wall's outer columns is tolerated on purpose: the field steers, it does not collide,
+			// so a bug cutting a corner along the face is expected. Deep inside is not.
+			const FIntPoint Cell = Dir->GetFlowCellFor(Enemy.Location);
+			if (Cell.X == WallCentreColumn && (Cell.Y < GapRowFirst || Cell.Y > GapRowLast))
+			{
+				++Violations;
+			}
+
+			// Past the wall's outer column means the bug is on the player's side.
+			if (Cell.X >= 0 && Cell.X < WallCentreColumn - 1)
+			{
+				CrossedIds.Add(Enemy.StableId);
+			}
+
+			if (Cell.X >= WallCentreColumn - 1 && Cell.X <= WallCentreColumn + 1)
+			{
+				if (Cell.Y >= GapRowFirst && Cell.Y <= GapRowLast)
+				{
+					ViaGapIds.Add(Enemy.StableId);
+				}
+				else if (Cell.X == WallCentreColumn)
+				{
+					ThroughWallIds.Add(Enemy.StableId);
+				}
+			}
+		}
+	}
+
+	void FSelfTest::Restore()
+	{
+		if (bGodModeSaved)
+		{
+			SetIntCVar(CVarKBPlayerGod, SavedGodMode);
+			bGodModeSaved = false;
+		}
+
+		if (AKBEnemyDirector* Dir = Director.Get())
+		{
+			Dir->DestroyFlowTestWalls();
+			Dir->CullAllRemaining();
+			Dir->BakeFlowObstaclesNow();
+		}
+	}
+
+	bool FSelfTest::Advance(float DeltaSeconds)
+	{
+		Elapsed += DeltaSeconds;
+
+		AKBEnemyDirector* Dir = Director.Get();
+		UWorld* LiveWorld = World.Get();
+		if (!Dir || !LiveWorld)
+		{
+			UE_LOG(LogKillBugs, Warning, TEXT("Flow.SelfTest: the director or the world went away"));
+			Restore();
+			return false;
+		}
+
+		switch (Step)
+		{
+		case 0:
+		{
+			const int32 CellsX = Dir->GetFlowCellsX();
+			const int32 CellsY = Dir->GetFlowCellsY();
+			const int32 Blocked = Dir->BakeFlowObstaclesNow();
+
+			// The four walls of the arena, sampled at the middle of each edge. The ring is the
+			// only geometry the arena has, so this is the whole of "the bake can see the world".
+			const bool bSouth = Dir->IsFlowBlockedAt(Dir->GetFlowCellCentre(CellsX / 2, 0));
+			const bool bNorth = Dir->IsFlowBlockedAt(Dir->GetFlowCellCentre(CellsX / 2, CellsY - 1));
+			const bool bWest = Dir->IsFlowBlockedAt(Dir->GetFlowCellCentre(0, CellsY / 2));
+			const bool bEast = Dir->IsFlowBlockedAt(Dir->GetFlowCellCentre(CellsX - 1, CellsY / 2));
+			const bool bCentreOpen = !Dir->IsFlowBlockedAt(FVector::ZeroVector);
+
+			const bool bPass = bSouth && bNorth && bWest && bEast && bCentreOpen;
+			UE_LOG(LogKillBugs, Display,
+				TEXT("Flow.SelfTest 1/6: the bake must find the four arena walls and leave the centre open - ")
+				TEXT("blocked=%d of %dx%d, edges(S,N,W,E)=(%d,%d,%d,%d), centre_open=%d -> %s"),
+				Blocked, CellsX, CellsY,
+				static_cast<int32>(bSouth), static_cast<int32>(bNorth),
+				static_cast<int32>(bWest), static_cast<int32>(bEast),
+				static_cast<int32>(bCentreOpen), bPass ? TEXT("PASS") : TEXT("FAIL"));
+
+			Step = 1;
+			break;
+		}
+
+		case 1:
+		{
+			// The regression guard, and the reason the open-field game is untouched: with nothing
+			// blocked, NO sight line may be reported as blocked, so no bug can ever take the field
+			// branch on the flat arena.
+			const int32 Samples = 10000;
+			const FVector Extent(5000.f, 5000.f, 0.f);
+
+			auto RandomPoint = [&Extent](FRandomStream& Stream) -> FVector
+			{
+				return FVector(Stream.FRandRange(-Extent.X, Extent.X),
+				               Stream.FRandRange(-Extent.Y, Extent.Y), 0.f);
+			};
+
+			Dir->ClearFlowObstacles();
+
+			FRandomStream EmptyStream(20261006);
+			int32 EmptyClear = 0;
+			for (int32 Index = 0; Index < Samples; ++Index)
+			{
+				if (Dir->FlowLineOfSightIsClear(RandomPoint(EmptyStream), RandomPoint(EmptyStream)))
+				{
+					++EmptyClear;
+				}
+			}
+
+			// Now a full column across the arena: every pair straddling it must report blocked.
+			const int32 CellsX = Dir->GetFlowCellsX();
+			const int32 CellsY = Dir->GetFlowCellsY();
+			const int32 Column = CellsX / 2;
+
+			TArray<FIntPoint> FullColumn;
+			FullColumn.Reserve(CellsY);
+			for (int32 Y = 0; Y < CellsY; ++Y)
+			{
+				FullColumn.Add(FIntPoint(Column, Y));
+			}
+			Dir->InjectFlowBlockedCells(FullColumn);
+
+			const float ColumnCentreX = Dir->GetFlowCellCentre(Column, 0).X;
+			FRandomStream WallStream(20261007);
+			int32 WallClear = 0;
+			for (int32 Index = 0; Index < Samples; ++Index)
+			{
+				const float Y0 = WallStream.FRandRange(-Extent.Y, Extent.Y);
+				const float Y1 = WallStream.FRandRange(-Extent.Y, Extent.Y);
+				if (Dir->FlowLineOfSightIsClear(FVector(ColumnCentreX - 500.f, Y0, 0.f),
+				                                FVector(ColumnCentreX + 500.f, Y1, 0.f)))
+				{
+					++WallClear;
+				}
+			}
+
+			// Back to the real arena for the rest of the test.
+			Dir->BakeFlowObstaclesNow();
+
+			const bool bPass = EmptyClear == Samples && WallClear == 0;
+			UE_LOG(LogKillBugs, Display,
+				TEXT("Flow.SelfTest 2/6: an empty mask must report every line clear (that is what keeps the ")
+				TEXT("old seek path), and an injected wall must block every line across it - ")
+				TEXT("empty_clear=%d/%d (want all), wall_clear=%d/%d (want 0) -> %s"),
+				EmptyClear, Samples, WallClear, Samples, bPass ? TEXT("PASS") : TEXT("FAIL"));
+
+			Step = 2;
+			break;
+		}
+
+		case 2:
+		{
+			const int32 CellsX = Dir->GetFlowCellsX();
+			const int32 CellsY = Dir->GetFlowCellsY();
+
+			WallCentreColumn = CellsX / 2;
+			GapRowFirst = CellsY / 2 + 3;
+			GapRowLast = GapRowFirst + 2;
+
+			TArray<FIntPoint> Wall;
+			for (int32 X = WallCentreColumn - 1; X <= WallCentreColumn + 1; ++X)
+			{
+				for (int32 Y = 0; Y < CellsY; ++Y)
+				{
+					if (Y < GapRowFirst || Y > GapRowLast)
+					{
+						Wall.Add(FIntPoint(X, Y));
+					}
+				}
+			}
+			Dir->InjectFlowBlockedCells(Wall);
+
+			// The player on one side, the swarm on the other, both well clear of the wall and of
+			// the gap: every straight line between them crosses blocked cells, so every bug has
+			// to be routed. (Bugs aligned with the gap would just walk through it and prove
+			// nothing.)
+			MoveEveryPlayerTo(LiveWorld, FVector(-300.f, 0.f, 100.f));
+
+			// Thirty bugs against a 100 HP pawn is roughly 60 dps. The subject has to survive its
+			// own test, or the target disappears mid-measurement.
+			if (!bGodModeSaved)
+			{
+				SavedGodMode = CVarKBPlayerGod.GetValueOnGameThread();
+				SetIntCVar(CVarKBPlayerGod, 1);
+				bGodModeSaved = true;
+			}
+
+			Dir->SpawnSwarm(30, FVector(400.f, 0.f, 0.f), 200.f);
+			SpawnedBugs = Dir->GetEnemyCount();
+			Dir->RebuildFlowFieldNow();
+
+			RunStartTime = Elapsed;
+
+			UE_LOG(LogKillBugs, Display,
+				TEXT("Flow.SelfTest 3/6: %d bugs at x~400 must reach the player at x=-300 across a 3-cell wall ")
+				TEXT("through a 3-row gap at y~%.0f, and never enter its middle column"),
+				SpawnedBugs, Dir->GetFlowCellCentre(WallCentreColumn, GapRowFirst).Y);
+
+			Step = 3;
+			break;
+		}
+
+		case 3:
+			ScanBugs();
+			if (Elapsed >= RunStartTime + 3.f)
+			{
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Flow.SelfTest 4/6: t=3.0s - crossed=%d/%d, via_gap=%d, through_wall=%d, ")
+					TEXT("at the player=%d (running)"),
+					CrossedIds.Num(), SpawnedBugs, ViaGapIds.Num(), ThroughWallIds.Num(), Reached);
+				Step = 4;
+			}
+			break;
+
+		case 4:
+			ScanBugs();
+			if (Elapsed >= RunStartTime + 8.f)
+			{
+				// Three claims, and all three are needed:
+				//   crossed      - they got to the far side at all
+				//   via_gap      - ... by way of the doorway, not by walking through the wall
+				//   through_wall - and none of them was ever a full cell deep inside it
+				// "Crossed" on its own proves nothing here: bugs have no collision, so a swarm
+				// that ignored the field entirely would plough straight through and score 30/30.
+				// "Arrived alive" would be worse still - the player's rifle shoots the subjects
+				// through the wall (bullets do not collide with the world), so that would be
+				// testing the weapon.
+				const bool bPass = CrossedIds.Num() >= SpawnedBugs
+					&& ViaGapIds.Num() >= SpawnedBugs
+					&& ThroughWallIds.Num() == 0;
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Flow.SelfTest 5/6: FINAL at t=8.0s - crossed the wall=%d/%d (want all), ")
+					TEXT("via the gap=%d (want all), through the wall=%d (want 0), ")
+					TEXT("at the player=%d -> %s"),
+					CrossedIds.Num(), SpawnedBugs, ViaGapIds.Num(), ThroughWallIds.Num(), Reached,
+					bPass ? TEXT("PASS") : TEXT("FAIL"));
+				Step = 5;
+			}
+			break;
+
+		case 5:
+		{
+			// The end-to-end step: real geometry, appearing at runtime, found by a re-bake. This is
+			// the maze's exact scenario, and the only step that proves the trace-based bake works
+			// on something the level did not ship with.
+			Dir->BakeFlowObstaclesNow();
+
+			// Z = 100 with a 200-tall cube: it must span the height the bake probes at, or the
+			// test passes a cube that happens to be invisible to it - which is exactly how the
+			// first run of this test failed, from the other direction.
+			const FVector CubeLocation(0.f, -3000.f, 100.f);
+			const bool bBefore = Dir->IsFlowBlockedAt(CubeLocation);
+
+			Dir->SpawnFlowTestWall(CubeLocation, FVector(600.f, 600.f, 200.f));
+			Dir->BakeFlowObstaclesNow();
+			const bool bAfter = Dir->IsFlowBlockedAt(CubeLocation);
+
+			const bool bPass = !bBefore && bAfter;
+			UE_LOG(LogKillBugs, Display,
+				TEXT("Flow.SelfTest 6/6: a cube spawned at runtime must appear in the mask after a re-bake - ")
+				TEXT("blocked_before=%d, blocked_after=%d -> %s"),
+				static_cast<int32>(bBefore), static_cast<int32>(bAfter),
+				bPass ? TEXT("PASS") : TEXT("FAIL"));
+
+			Step = 6;
+			break;
+		}
+
+		default:
+			UE_LOG(LogKillBugs, Display, TEXT("Flow.SelfTest: done - scenery restored, swarm cleared"));
+			Restore();
+			return false;
+		}
+
+		return true;
+	}
+} // namespace KBFlowCommands
+
+void AKBEnemyDirector::ConsoleFlowRebake(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AKBEnemyDirector> It(World); It; ++It)
+	{
+		It->BakeFlowObstaclesNow();
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
+}
+
+void AKBEnemyDirector::ProbeFlowQuery(const FVector& Location)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const float HalfCell = FlowField.GetCellSize() * 0.5f;
+	const FVector Centre(Location.X, Location.Y,
+	                     Location.Z > 0.f ? Location.Z : FlowProbeHeight);
+	const FCollisionShape Probe = FCollisionShape::MakeBox(FVector(HalfCell, HalfCell, 10.f));
+
+	FCollisionQueryParams Params(TEXT("KBFlowProbe"), /*bTraceComplex=*/false);
+
+	// Every channel worth asking about, because "the query found nothing" has more than one
+	// cause and they are indistinguishable from the bake's own log line.
+	const TPair<ECollisionChannel, const TCHAR*> Channels[] =
+	{
+		{ ECC_WorldStatic,  TEXT("WorldStatic") },
+		{ ECC_WorldDynamic, TEXT("WorldDynamic") },
+		{ ECC_Visibility,   TEXT("Visibility") },
+		{ ECC_Camera,       TEXT("Camera") }
+	};
+
+	for (const TPair<ECollisionChannel, const TCHAR*>& Channel : Channels)
+	{
+		const bool bBlocking = World->OverlapBlockingTestByChannel(
+			Centre, FQuat::Identity, Channel.Key, Probe, Params);
+
+		TArray<FOverlapResult> Overlaps;
+		World->OverlapMultiByChannel(Overlaps, Centre, FQuat::Identity, Channel.Key, Probe, Params);
+
+		UE_LOG(LogKillBugs, Display,
+			TEXT("Flow probe at (%.0f, %.0f, %.0f) [%s]: blocking=%d, overlaps=%d"),
+			Centre.X, Centre.Y, Centre.Z, Channel.Value,
+			static_cast<int32>(bBlocking), Overlaps.Num());
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			UE_LOG(LogKillBugs, Display, TEXT("Flow probe:   hit %s (%s)"),
+				*GetNameSafe(Overlap.GetActor()), *GetNameSafe(Overlap.GetComponent()));
+		}
+	}
+
+	// What the RUNNING world actually contains. The editor's actor list and the game's are not
+	// the same list: world partition streams actors in, so a level that lists four walls can
+	// perfectly well load with none of them present. Every other question here is downstream of
+	// this one.
+	int32 ActorCount = 0;
+	UE_LOG(LogKillBugs, Display, TEXT("Flow probe: actors in the running world -"));
+	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
+	{
+		++ActorCount;
+		const AActor* Actor = *ActorIt;
+		const FVector ActorLocation = Actor->GetActorLocation();
+		UE_LOG(LogKillBugs, Display, TEXT("Flow probe:   %s %s at (%.0f, %.0f, %.0f)"),
+			*Actor->GetClass()->GetName(), *Actor->GetName(),
+			ActorLocation.X, ActorLocation.Y, ActorLocation.Z);
+	}
+	UE_LOG(LogKillBugs, Display, TEXT("Flow probe: %d actor(s)"), ActorCount);
+
+	// Downward line from well above: the most physical test there is, and it sidesteps every
+	// overlap-flag subtlety. A wall at this column must be crossed. If this hits nothing, the
+	// geometry genuinely carries no collision in the running game - which is a different bug
+	// from "the query is wrong", and the only way to tell the two apart.
+	FHitResult DownHit;
+	const bool bDown = World->LineTraceSingleByChannel(
+		DownHit, Centre + FVector(0.f, 0.f, 1000.f), Centre - FVector(0.f, 0.f, 500.f),
+		ECC_Visibility, Params);
+	UE_LOG(LogKillBugs, Display, TEXT("Flow probe: downward trace hit=%d, %s at Z %.0f"),
+		static_cast<int32>(bDown), bDown ? *GetNameSafe(DownHit.GetActor()) : TEXT("nothing"),
+		bDown ? DownHit.ImpactPoint.Z : 0.f);
+}
+
+void AKBEnemyDirector::ConsoleFlowProbe(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AKBEnemyDirector> It(World); It; ++It)
+	{
+		// Default: the middle of the eastern edge cell - where the arena's east wall is.
+		FVector Location(It->GetFlowCellCentre(It->GetFlowCellsX() - 1, It->GetFlowCellsY() / 2));
+		if (Args.Num() >= 2)
+		{
+			Location = FVector(FCString::Atof(*Args[0]), FCString::Atof(*Args[1]),
+			                   Args.Num() >= 3 ? FCString::Atof(*Args[2]) : 0.f);
+		}
+
+		It->ProbeFlowQuery(Location);
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
+}
+
+void AKBEnemyDirector::ConsoleFlowWall(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AKBEnemyDirector> It(World); It; ++It)
+	{
+		// Default: 2000 units in front of whoever typed the command (on +X), so the wall lands
+		// between the swarm and the player without any arguments at all.
+		FVector Centre(2000.f, 0.f, 150.f);
+		if (Args.Num() >= 2)
+		{
+			Centre = FVector(FCString::Atof(*Args[0]), FCString::Atof(*Args[1]), 150.f);
+		}
+		else if (const APlayerController* PlayerController = World->GetFirstPlayerController())
+		{
+			if (const APawn* Pawn = PlayerController->GetPawn())
+			{
+				Centre += FVector(Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, 0.f);
+			}
+		}
+
+		const float Length = Args.Num() >= 3 ? FCString::Atof(*Args[2]) : 4000.f;
+		const float Thickness = Args.Num() >= 4 ? FCString::Atof(*Args[3]) : 200.f;
+		const FVector Size(Thickness, Length, 300.f);
+
+		It->SpawnFlowTestWall(Centre, Size);
+		It->BakeFlowObstaclesNow();
+
+		UE_LOG(LogKillBugs, Display,
+			TEXT("Flow field: test wall %.0f x %.0f at (%.0f, %.0f) - KB.Swarm.FlowWallClear removes it"),
+			Size.X, Size.Y, Centre.X, Centre.Y);
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
+}
+
+void AKBEnemyDirector::ConsoleFlowWallClear(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AKBEnemyDirector> It(World); It; ++It)
+	{
+		It->DestroyFlowTestWalls();
+		const int32 Blocked = It->BakeFlowObstaclesNow();
+		UE_LOG(LogKillBugs, Display, TEXT("Flow field: test walls cleared, %d blocked cell(s) left"), Blocked);
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
+}
+
+void AKBEnemyDirector::ConsoleFlowSelfTest(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AKBEnemyDirector> It(World); It; ++It)
+	{
+		TSharedPtr<KBFlowCommands::FSelfTest> Test = MakeShared<KBFlowCommands::FSelfTest>();
+		Test->Director = *It;
+		Test->World = World;
+
+		UE_LOG(LogKillBugs, Display, TEXT("Flow.SelfTest: started"));
+
+		FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([Test](float DeltaSeconds) -> bool
+			{
+				return Test->Advance(DeltaSeconds);
+			}));
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBEnemyDirector in this world"));
+}
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleFlowRebake(
+	TEXT("KB.Swarm.FlowRebake"),
+	TEXT("KB.Swarm.FlowRebake - re-bake the flow field's obstacle mask from the world's collision "
+	     "right now. The escape hatch for geometry that appeared after BeginPlay (a maze); the "
+	     "maze build path calls InvalidateFlowObstacles itself."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleFlowRebake));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleFlowProbe(
+	TEXT("KB.Swarm.FlowProbe"),
+	TEXT("KB.Swarm.FlowProbe [x] [y] - run the obstacle bake's own overlap query at one point and "
+	     "report what every collision channel returns there, plus what an upward line trace hits. "
+	     "For the question 'why is my field wrong', which is otherwise a guess between a wrong "
+	     "position, a wrong height and a channel the geometry does not block. Default point is the "
+	     "middle of the arena's eastern edge cell."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleFlowProbe));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleFlowWall(
+	TEXT("KB.Swarm.FlowWall"),
+	TEXT("KB.Swarm.FlowWall [x] [y] [length] [thickness] - spawn a blocking wall the swarm has to "
+	     "route around and re-bake, so the flow field can be watched in a window instead of "
+	     "inferred from a log. No arguments puts it 2000 units in front of the local player."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleFlowWall));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleFlowWallClear(
+	TEXT("KB.Swarm.FlowWallClear"),
+	TEXT("KB.Swarm.FlowWallClear - remove every wall KB.Swarm.FlowWall spawned and re-bake."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleFlowWallClear));
+
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleFlowSelfTest(
+	TEXT("KB.Swarm.FlowSelfTest"),
+	TEXT("KB.Swarm.FlowSelfTest - one command walks the whole flow field chain: bake, sight-line "
+	     "predicate, routing 30 bugs around a wall through a gap, and a runtime-spawned cube "
+	     "found by a re-bake. Six steps, each logging what it proves."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBEnemyDirector::ConsoleFlowSelfTest));

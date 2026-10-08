@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Swarm/KBFlowField.h"
 #include "Swarm/KBSwarmTypes.h"
 #include "KBEnemyDirector.generated.h"
 
@@ -97,6 +98,59 @@ public:
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Swarm")
 	float GetEnemySpeedScale() const { return EnemySpeedScale; }
 
+	// ---- Flow field (server only) --------------------------------------------------------
+
+	/**
+	 * Marks the swarm's obstacle mask stale; the next tick re-bakes it from the world.
+	 *
+	 * THE call the maze cut makes when it has finished building geometry. It is not optional and
+	 * its absence is silent: everything keeps running, and the field quietly describes the arena
+	 * it was baked from. Call it unconditionally at the end of a build, never conditionally.
+	 */
+	void InvalidateFlowObstacles();
+
+	// ---- Flow field diagnostics ----------------------------------------------------------
+	// Public so the console commands and the self test can drive the field directly. Reading a
+	// field by simulating 30 bugs and watching where they end up is not a test anybody can
+	// debug; these let a caller ask the field a question and get an answer.
+
+	int32 GetFlowCellsX() const { return FlowField.GetCellsX(); }
+	int32 GetFlowCellsY() const { return FlowField.GetCellsY(); }
+	float GetFlowCellSize() const { return FlowField.GetCellSize(); }
+	FVector GetFlowCellCentre(int32 X, int32 Y) const { return FlowField.GetCellCentre(X, Y); }
+	int32 GetFlowBlockedCellCount() const { return FlowField.GetBlockedCellCount(); }
+	int32 GetFlowReachableCellCount() const { return FlowField.GetReachableCellCount(); }
+	FIntPoint GetFlowCellFor(const FVector& Location) const;
+
+	bool FlowLineOfSightIsClear(const FVector& Start, const FVector& End) const
+	{
+		return FlowField.LineOfSightIsClear(Start, End);
+	}
+
+	bool IsFlowBlockedAt(const FVector& Location) const { return FlowField.IsBlockedAt(Location); }
+
+	void InjectFlowBlockedCells(const TArray<FIntPoint>& Cells) { FlowField.InjectBlockedCells(Cells); }
+	void ClearFlowObstacles() { FlowField.ClearObstacles(); }
+
+	/** Bakes the mask from the world right now and re-solves. Returns the blocked-cell count. */
+	int32 BakeFlowObstaclesNow();
+
+	/** Re-collects the sources and re-solves, without touching the obstacle mask. */
+	void RebuildFlowFieldNow();
+
+	/**
+	 * Spawns a blocking box the flow field can see, and returns it.
+	 *
+	 * The demo and test path: a wall that exists only for this session, so routing can be watched
+	 * in a window instead of inferred from a log. Movable mobility because a Static actor cannot
+	 * be scaled after spawn - and it still blocks ECC_WorldStatic, which is all the bake asks.
+	 */
+	AActor* SpawnFlowTestWall(const FVector& Centre, const FVector& Extent);
+	void DestroyFlowTestWalls();
+
+	/** Runs the bake's query at one point and reports every channel and every thing it hits. */
+	void ProbeFlowQuery(const FVector& Location);
+
 	// ---- Queries used by weapons ---------------------------------------------------------
 
 	/**
@@ -164,6 +218,11 @@ public:
 	static void ConsoleSetSwarmCount(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleKillEnemies(const TArray<FString>& Args, UWorld* World);
 	static void ConsoleCullSwarm(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleFlowRebake(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleFlowProbe(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleFlowWall(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleFlowWallClear(const TArray<FString>& Args, UWorld* World);
+	static void ConsoleFlowSelfTest(const TArray<FString>& Args, UWorld* World);
 
 protected:
 	/** The whole swarm. One property on one always-relevant actor. */
@@ -206,6 +265,15 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Swarm")
 	float SeparationStrength = 1.1f;
 
+	/**
+	 * Height the obstacle bake probes at. Above the floor (a plane at Z=0), below the top of the
+	 * arena's 400-tall walls - 100 is in the middle of both, and the swarm simulates at Z=0, so
+	 * this is a property of the probe rather than of the bugs. Cell size and rebuild cadence are
+	 * in UKBGameSettings, where they can actually be changed (this actor is spawned in code).
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "KillBugs|Swarm")
+	float FlowProbeHeight = 100.f;
+
 	// ---- Contact damage ------------------------------------------------------------------
 	// Cadence, reach and the simultaneous-biter cap are in UKBGameSettings -> Combat|Contact.
 
@@ -233,6 +301,23 @@ private:
 	TArray<FKBEnemySim> Sim;
 	FKBEnemyGrid Grid;
 
+	/**
+	 * Which way the nearest player is, for bugs that have a wall in the way. See KBFlowField.h.
+	 *
+	 * The separate grid from the separation one is deliberate: 200 cm cells are fine for a
+	 * neighbour query and too coarse for a corridor, and the two are rebuilt on cadences three
+	 * orders of magnitude apart (every frame vs ten times a second).
+	 */
+	FKBFlowField FlowField;
+	float FlowRebuildAccumulator = 0.f;
+
+	/** Reused so collecting the field's sources never allocates. */
+	TArray<FVector> FlowSourceScratch;
+
+	/** Test walls spawned by KB.Swarm.FlowWall / KB.Swarm.FlowSelfTest, so they can be cleared. */
+	UPROPERTY()
+	TArray<TObjectPtr<AActor>> FlowTestWalls;
+
 	int32 NextStableId = 1;
 	int32 CurrentWaveIndex = 0;
 
@@ -245,6 +330,17 @@ private:
 	// Perf log accumulators; driven by CVarKBSwarmPerfLog (see KBConsoleVariables.h).
 	double PerfSimSeconds = 0.0;
 	double PerfNetSeconds = 0.0;
+	double PerfFlowSeconds = 0.0;
+
+	/**
+	 * How many bugs took the field branch since the last log flush.
+	 *
+	 * The number that answers "is the field doing anything at all" - on the flat arena it should
+	 * read 0, because nothing ever blocks a sight line. Meaningless unless KB.Swarm.PerfLog > 0,
+	 * since it is reset when a line is printed.
+	 */
+	int32 PerfFlowRouted = 0;
+
 	int32 PerfFrames = 0;
 	float PerfElapsed = 0.f;
 
@@ -263,6 +359,22 @@ private:
 
 	void SimulateSwarm(float DeltaSeconds);
 	void SyncReplication(float DeltaSeconds);
+
+	/**
+	 * Bakes the obstacle mask if it is stale, then re-solves on the configured cadence.
+	 *
+	 * Called from Tick BEFORE SimulateSwarm and outside its stat scope, so a tenth-of-a-second
+	 * rebuild spike does not disappear into the per-frame simulation average. Deliberately not
+	 * inside SimulateSwarm, which returns early when the swarm is empty - a test that drives an
+	 * empty field still has to be able to rebuild it.
+	 */
+	void RefreshFlowField(float DeltaSeconds);
+
+	/** Every valid player pawn's position, or the arena centre when there are none. */
+	void CollectFlowSources();
+
+	/** Gated by CVarKBSwarmFlowDebug, compiled out of shipping, and skipped when it cannot render. */
+	void DrawFlowFieldDebug() const;
 
 	/** Bites any player standing in the swarm. Runs on its own slower cadence. */
 	void TickContactDamage(float DeltaSeconds);

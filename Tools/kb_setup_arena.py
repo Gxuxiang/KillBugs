@@ -63,15 +63,32 @@ def _try_set(obj, property_name, value):
         return False
 
 
-def scale_to_size(actor, mesh, target_size):
+def scale_to_size(actor, mesh, target_size, centre):
     """
-    Scale a static mesh actor so its bounds match target_size (a Vector of world units).
+    Scale a static mesh actor to target_size and put its SCALED BOUNDS centred on `centre`.
 
     Any target component of 0 means "leave that axis at scale 1". This matters for flat
     meshes: SM_Plane has zero Z extent, so a single degenerate axis must not abandon the
     whole scale - that silently leaves the floor 1 metre across.
+
+    The repositioning is not a nicety, and the reason is worth keeping:
+
+    A mesh is scaled about its PIVOT, and a mesh's pivot is wherever its author put it. These
+    prototyping meshes put it on the minimum corner - SM_Cube's bounds origin is (50,50,50),
+    its geometry occupying [0,100] locally. So scaling grows the cube in +X/+Y/+Z only, and
+    placing the actor at the centre you want is only correct for a centred pivot.
+
+    The four walls were built that way: each was spawned where its centre belonged, grew a
+    full wall-length in +Y (or +X), and floated 200 units up. Four bars in a pinwheel, with the
+    arena open on every side - and nothing ever said so, because nothing in the game had ever
+    collided with them: the swarm is clamped by coordinates, bullets do not test the world, and
+    no camera looks at the arena from the side. The flow field's obstacle bake was the first
+    thing to ask what is physically there, and it found a gap under every wall.
+
+    Compensating here rather than at each call site means it holds for any mesh, pivot and all.
     """
-    extent = mesh.get_bounds().box_extent
+    bounds = mesh.get_bounds()
+    extent = bounds.box_extent
 
     scale = unreal.Vector(1.0, 1.0, 1.0)
     for axis, target in (("x", target_size.x), ("y", target_size.y), ("z", target_size.z)):
@@ -84,6 +101,15 @@ def scale_to_size(actor, mesh, target_size):
         setattr(scale, axis, target / (half * 2.0))
 
     actor.set_actor_scale3d(scale)
+
+    # Where the mesh's bounds centre ends up if the actor sits at `centre`, and the move that
+    # puts it back: scaled_bounds_centre = actor_location + scale * bounds_origin.
+    offset = unreal.Vector(scale.x * bounds.origin.x,
+                           scale.y * bounds.origin.y,
+                           scale.z * bounds.origin.z)
+    actor.set_actor_location(unreal.Vector(centre.x - offset.x,
+                                           centre.y - offset.y,
+                                           centre.z - offset.z), False, False)
 
 
 # ---------------------------------------------------------------------------------------
@@ -148,7 +174,8 @@ if floor_mesh is not None:
         # Z target 0 = leave the plane's own scale alone; it has no thickness to size.
         scale_to_size(floor, floor_mesh, unreal.Vector(FLOOR_HALF_SIZE * 2.0,
                                                        FLOOR_HALF_SIZE * 2.0,
-                                                       0.0))
+                                                       0.0),
+                      unreal.Vector(0.0, 0.0, 0.0))
         log("floor spawned")
 
 # ---------------------------------------------------------------------------------------
@@ -180,7 +207,10 @@ if box_mesh is not None:
             WALL_THICKNESS if along_x else wall_length,
             WALL_HEIGHT,
         )
-        scale_to_size(wall, box_mesh, size)
+        # `location` is the wall's intended CENTRE: half a wall-height up, and half a wall out
+        # along the axis its thickness runs on. scale_to_size moves the actor so the scaled
+        # bounds actually land there, whatever the mesh's pivot is.
+        scale_to_size(wall, box_mesh, size, location)
     log("boundary walls spawned")
 
 # ---------------------------------------------------------------------------------------

@@ -11,7 +11,11 @@ enum class EKBItemType : uint8
 	/** The reason to search. Carried for the run and banked only by a successful extraction. */
 	Material UMETA(DisplayName = "Material"),
 
-	/** Relief, not the goal: picked up on contact and spent immediately. */
+	/**
+	 * Relief, not the goal. Picked up INTO the backpack (it occupies weight like anything else)
+	 * and spent later by using it - the key, the hotbar, or right-click. No longer healed on
+	 * contact, which is what this comment used to say.
+	 */
 	Medkit   UMETA(DisplayName = "Medkit")
 };
 

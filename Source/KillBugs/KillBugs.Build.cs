@@ -28,7 +28,9 @@ public class KillBugs : ModuleRules
 			"Slate",
 			"SlateCore",
 			"Niagara",         // death/hit VFX spawning
-			"AssetRegistry"    // card discovery by scanning, so cards need no hand-kept list
+			"AssetRegistry",   // card discovery by scanning, so cards need no hand-kept list
+			"Sockets",         // ISocketSubsystem, for "what is this machine's LAN address"
+			"ApplicationCore"  // the clipboard, for copying that address out to the other player
 		});
 
 		// Deliberately NOT added:

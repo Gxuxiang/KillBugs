@@ -114,6 +114,28 @@ public:
 	/** Debug and test path: connect straight to "host:port", skipping discovery entirely. */
 	void JoinAddress(const FString& Address);
 
+	/** The port a host listens on when nobody overrode it. */
+	static constexpr int32 DefaultGamePort = 7777;
+
+	/**
+	 * Completes a typed address into something JoinAddress accepts.
+	 *
+	 * A bare IP gets the default port appended, and a pasted "ip:port" is left alone - the port
+	 * is the part a player is least likely to know and most likely to get wrong, so it should
+	 * not be something they have to type.
+	 */
+	static FString NormalizeJoinAddress(const FString& Typed);
+
+	/**
+	 * Every non-loopback IPv4 this machine has, best candidate first.
+	 *
+	 * Plural on purpose: a machine with a VM, WSL or Docker has several, and showing only one
+	 * risks showing the wrong one with no way to tell. The ordering puts the addresses a home
+	 * LAN actually uses first (192.168.x, then 10.x, then the rest of 172.x, which is where
+	 * virtual adapters usually live) so the first entry is the one to read out.
+	 */
+	static TArray<FString> GetLocalIPv4Addresses();
+
 	/** Tears the session down and returns to the lobby. */
 	void LeaveSession();
 

@@ -24,6 +24,8 @@ class KILLBUGS_API AKBPlayerState : public APlayerState
 public:
 	AKBPlayerState();
 
+	virtual void BeginPlay() override;
+
 	/** Index into the player array, stable for the run. Used to seed per-player card rolls. */
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
 	int32 GetKBPlayerIndex() const { return KBPlayerIndex; }
@@ -51,8 +53,60 @@ public:
 	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
 	int32 GetMaterials() const { return Materials; }
 
-	/** Server-only. Picked up from the ground; banked only if the team extracts. */
-	void AddMaterials(int32 Amount);
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
+	int32 GetMedkits() const { return Medkits; }
+
+	/** Everything carried, in backpack weight units. Derived - never stored. */
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
+	int32 GetCarriedWeight() const;
+
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
+	int32 GetBackpackCapacity() const;
+
+	/** True when nothing more will fit. The HUD turns this red. */
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Player")
+	bool IsBackpackFull() const { return GetCarriedWeight() >= GetBackpackCapacity(); }
+
+	/**
+	 * Server-only. Adds only if the backpack has room for the whole amount.
+	 *
+	 * The whole amount or nothing: a partial pickup would mean splitting a ground stack, and
+	 * stacks that split are a container mechanic this cut does not have. OutReason is
+	 * player-facing Chinese, because every refusal reaches the screen one way or another.
+	 */
+	bool TryAddMaterials(int32 Amount, FString& OutReason);
+	bool TryAddMedkits(int32 Amount, FString& OutReason);
+
+	/**
+	 * Server-only. Takes items OUT of the backpack, for dropping them on the ground.
+	 *
+	 * Broadcasts like the TryAdd pair does, and it has to: the HUD's weight readout and the
+	 * capacity gate both derive from these two counters, so a silent decrement would leave the
+	 * weight bar showing a number that no longer matches what is carried.
+	 */
+	bool TryRemoveMaterials(int32 Amount, FString& OutReason);
+	bool TryRemoveMedkits(int32 Amount, FString& OutReason);
+
+	/**
+	 * Puts the banked medkits into the backpack. Server-only, and only ONCE per run.
+	 *
+	 * The medkit analogue of SeedGold, and it exists for the same shape of reason: the loadout
+	 * comes from this machine's own profile, so it has to be applied by the authority and must
+	 * never be re-applied (a second seed would duplicate the stash into the run).
+	 */
+	void SeedBackpack(int32 InMedkits);
+
+	/**
+	 * Server-only, and the ONLY writer of Medkits. Consumes one and heals.
+	 *
+	 * Refused, with a reason and no consumption, while downed, with none carried, or at full
+	 * health - the last of which is the old "do not waste a medkit" rule, moved from pickup
+	 * time (where the game decided for you) to use time (where you decide).
+	 */
+	bool TryUseMedkit(FString& OutReason);
+
+	/** `KB.Backpack.UiSelfTest`. Lives here with the rest of the backpack's console surface. */
+	static void ConsoleBackpackUiSelfTest(const TArray<FString>& Args, UWorld* World);
 
 	/**
 	 * Gives this player the profile total they arrived with. Server-only, and it only works ONCE.
@@ -152,6 +206,18 @@ protected:
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
 	int32 Materials = 0;
 
+	/**
+	 * Medkits carried this run, in the backpack.
+	 *
+	 * A counter rather than a container, for the same reason Materials is one: there is exactly
+	 * one kind of medkit, and a container with one element is a taxonomy with one element. What
+	 * makes it more than a second Materials is where the number comes from and where it goes -
+	 * it is seeded from the stash at the start of a run, and what is left at the end goes back
+	 * to the stash. Materials only ever travel one way.
+	 */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
+	int32 Medkits = 0;
+
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "KillBugs|Player")
 	int32 XP = 0;
 
@@ -163,4 +229,7 @@ protected:
 
 	/** Not replicated: it is only ever consulted on the authority, which is where seeding happens. */
 	bool bGoldSeeded = false;
+
+	/** Same reasoning as bGoldSeeded. See SeedBackpack. */
+	bool bBackpackSeeded = false;
 };

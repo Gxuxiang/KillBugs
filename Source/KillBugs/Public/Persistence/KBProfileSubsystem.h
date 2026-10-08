@@ -91,8 +91,43 @@ public:
 	 */
 	void LoseCarriedWeapons();
 
+	// ---- Carried consumables ---------------------------------------------------------------
+
+	UFUNCTION(BlueprintPure, Category = "KillBugs|Profile")
+	int32 GetBankedMedkits() const { return BankedMedkits; }
+
+	/**
+	 * What came home: the medkits still in the backpack when the run ended.
+	 *
+	 * An ABSOLUTE replacement, not an addition - the whole stash was carried in, so what came out
+	 * is the new stock. That is the weapon rule (ApplyExtractedWeapons), not the material rule,
+	 * and mixing the two up would inflate the stash by everything the player happened to be
+	 * carrying.
+	 */
+	void ApplyExtractedMedkits(int32 CarriedOut);
+
+	/**
+	 * A wipe took the medkits that were carried in - the same bargain as the weapons.
+	 *
+	 * Subtracts the snapshot BeginRun took, and CONSUMES it: the subtraction is the whole
+	 * effect, so a second call must subtract nothing rather than take a second helping. That
+	 * idempotency is why this needs no latch, unlike the two currencies that add.
+	 */
+	void LoseCarriedMedkits();
+
 	/** Debug: puts currency straight into the bank. `KB.Profile.Grant`. */
-	void AddBankedForDebug(int32 Gold, int32 Materials);
+	void AddBankedForDebug(int32 Gold, int32 Materials, int32 Medkits = 0);
+
+	/**
+	 * Debug: empties the stash's medkits. `KB.Backpack.ClearStashMedkits`.
+	 *
+	 * Medkits only, and on purpose. Every other thing the stash holds has a way to spend it
+	 * inside the game - materials sell for gold, weapons are carried and lost - so a cheat for
+	 * those would be a shortcut past a real decision. Banked medkits have no such path: they are
+	 * re-seeded into every run whether the player wants them or not, and until something spends
+	 * them there is no way back down.
+	 */
+	void ClearBankedMedkitsForDebug();
 
 	/** Re-reads the save from disk. `KB.Profile.Reload`, for testing persistence in one process. */
 	void ReloadProfile();
@@ -137,6 +172,9 @@ public:
 	/** The same ceiling, for the same reason. */
 	static int32 MaxBankedMaterials() { return TNumericLimits<int32>::Max() / 2; }
 
+	/** The same ceiling, for the same reason. */
+	static int32 MaxBankedMedkits() { return TNumericLimits<int32>::Max() / 2; }
+
 private:
 	/** Reads the profile off disk, or starts at zero. Never fails - a bad profile is a fresh one. */
 	void LoadProfile();
@@ -153,11 +191,17 @@ private:
 	/** Materials brought home by successful extractions. */
 	int32 BankedMaterials = 0;
 
+	/** Medkits in the stash. Travels both ways: in at the start of a run, out when it ends. */
+	int32 BankedMedkits = 0;
+
 	/** Owned weapons. Shrinks on a wipe, grows on a purchase or a successful extraction. */
 	TArray<FKBSavedWeapon> Stash;
 
 	/** What the current run set out with. See LoseCarriedWeapons. */
 	TArray<FSoftObjectPath> CarriedThisRun;
+
+	/** How many medkits this run set out with. See LoseCarriedMedkits. */
+	int32 CarriedMedkitsThisRun = 0;
 
 	/** Whether this run's earnings have already been banked. Cleared by BeginRun. */
 	bool bBankedThisRun = false;

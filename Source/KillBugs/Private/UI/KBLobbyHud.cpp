@@ -1,6 +1,7 @@
 #include "UI/KBLobbyHud.h"
 
 #include "Audio/KBAudioSubsystem.h"
+#include "HAL/PlatformApplicationMisc.h"
 #include "Core/KBPlayerState.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
@@ -119,6 +120,12 @@ void AKBLobbyHud::BeginPlay()
 	UE_LOG(LogKillBugs, Display, TEXT("KB Lobby: stash readout gold %d | materials %d"),
 		Profile ? Profile->GetBankedGold() : 0,
 		Profile ? Profile->GetBankedMaterials() : 0);
+
+	// Logged as well as drawn, for the same reason the stash line is: a headless run cannot see
+	// the screen, and "the address is wrong" is the failure that matters here.
+	LocalAddresses = UKBSessionSubsystem::GetLocalIPv4Addresses();
+	UE_LOG(LogKillBugs, Display, TEXT("KB Lobby: this machine's address(es): %s"),
+		LocalAddresses.Num() > 0 ? *FString::Join(LocalAddresses, TEXT(", ")) : TEXT("none found"));
 }
 
 void AKBLobbyHud::DrawHUD()
@@ -183,6 +190,13 @@ void AKBLobbyHud::DrawHUD()
 	{
 		DrawServerList(Panel);
 		DrawPlayerList(Panel);
+	}
+
+	// Only with the room list, not with the shop: the shop's rows reach down into this band, and
+	// "join a room by address" has nothing to say while the player is browsing the stash.
+	if (!bShopOpen)
+	{
+		DrawManualJoin(Panel);
 	}
 
 	DrawStatusLine(Panel);
@@ -307,8 +321,8 @@ void AKBLobbyHud::DrawStash(const FBox2D& Panel, float RuleY)
 
 	// Read straight off this machine's own profile rather than off a PlayerState: the stash is
 	// this machine's, it needs no handshake from the host to be correct, and it cannot be stale.
-	const FString Line = FString::Printf(TEXT("金币 %d      材料 %d"),
-		Profile->GetBankedGold(), Profile->GetBankedMaterials());
+	const FString Line = FString::Printf(TEXT("金币 %d      材料 %d      药包 %d"),
+		Profile->GetBankedGold(), Profile->GetBankedMaterials(), Profile->GetBankedMedkits());
 
 	float Width = 0.f;
 	float Height = 0.f;
@@ -348,6 +362,31 @@ void AKBLobbyHud::DrawShop(const FBox2D& Panel)
 	const float Left = Panel.Min.X + Style::Pad;
 	const float Width = Style::PanelWidth - Style::Pad * 2.f;
 	const float Top = Panel.Min.Y + Style::Pad + 70.f;
+
+	// An empty loadout is a legitimate state and a completely silent one. The run carries only
+	// what is EQUIPPED, and buying a weapon deliberately does not equip it - so a player can own
+	// three guns, walk into a run with none, and have nothing anywhere telling them why. (That is
+	// not hypothetical: it is exactly what happened, and it read as "the game is broken".)
+	//
+	// Two different situations, two different sentences: owning weapons and not having equipped
+	// them is a different problem from having none at all.
+	const TArray<FKBSavedWeapon>& Stash = Profile->GetStash();
+	int32 EquippedCount = 0;
+	for (const FKBSavedWeapon& Entry : Stash)
+	{
+		if (Entry.bEquipped)
+		{
+			++EquippedCount;
+		}
+	}
+
+	if (EquippedCount == 0)
+	{
+		DrawText(Stash.Num() > 0
+			? TEXT("⚠ 一把武器都没配装：本局会空手进场。点武器自己那一行（右边写「点此带上」）就带上了")
+			: TEXT("⚠ 仓库里没有武器：先在下面买一把，再点它那一行配装"),
+			Style::Bad, Left, Top - 56.f, Font, 0.95f, false);
+	}
 
 	DrawText(FString::Printf(TEXT("商店　（点击一行执行；带进去的武器团灭会掉）")),
 		Style::Dim, Left, Top - 28.f, Font, 0.95f, false);
@@ -584,6 +623,154 @@ void AKBLobbyHud::DrawPlayerList(const FBox2D& Panel)
 		GetTextSize(ReadyMark, MarkWidth, MarkHeight, Font, 0.95f);
 		DrawText(ReadyMark, bReady ? Style::Good : Style::Faint,
 			Left + Style::RightColumnWidth - 14.f - MarkWidth, RowY + 7.f, Font, 0.95f, false);
+	}
+}
+
+// -------------------------------------------------------------------------------------------
+// Manual join
+// -------------------------------------------------------------------------------------------
+
+void AKBLobbyHud::BeginAddressEntry()
+{
+	bTypingAddress = true;
+	AddressBuffer.Reset();
+	ShopMessage.Reset();
+}
+
+void AKBLobbyHud::CancelAddressEntry()
+{
+	bTypingAddress = false;
+	AddressBuffer.Reset();
+}
+
+void AKBLobbyHud::AppendAddressChar(TCHAR Character)
+{
+	// Filtered rather than validated later: this buffer goes straight to a connect call, so the
+	// cheapest place to reject a character is the moment it arrives. Everything that is not a
+	// digit or a dot is a typo - an IPv4 address cannot contain anything else.
+	if (!FChar::IsDigit(Character) && Character != TEXT('.'))
+	{
+		return;
+	}
+
+	// "255.255.255.255:65535" is 21 characters; anything longer cannot become an address.
+	if (AddressBuffer.Len() < 21)
+	{
+		AddressBuffer.AppendChar(Character);
+	}
+}
+
+void AKBLobbyHud::BackspaceAddress()
+{
+	if (!AddressBuffer.IsEmpty())
+	{
+		AddressBuffer.LeftChopInline(1);
+	}
+}
+
+void AKBLobbyHud::PasteAddressFromClipboard()
+{
+	FString Pasted;
+	FPlatformApplicationMisc::ClipboardPaste(Pasted);
+	Pasted.TrimStartAndEndInline();
+
+	// Filtered, not rejected. A player pasting "192.168.31.153 快连我" should get the address
+	// rather than nothing - refusing the whole string would look like paste is broken.
+	FString Filtered;
+	for (const TCHAR Character : Pasted)
+	{
+		if (FChar::IsDigit(Character) || Character == TEXT('.') || Character == TEXT(':'))
+		{
+			Filtered.AppendChar(Character);
+		}
+	}
+
+	if (!Filtered.IsEmpty() && Filtered.Len() <= 21)
+	{
+		AddressBuffer = Filtered;
+	}
+}
+
+FString AKBLobbyHud::TakeAddressBuffer()
+{
+	const FString Result = AddressBuffer;
+	bTypingAddress = false;
+	AddressBuffer.Reset();
+	return Result;
+}
+
+FString AKBLobbyHud::GetPreferredLocalAddress() const
+{
+	return LocalAddresses.Num() > 0 ? LocalAddresses[0] : FString();
+}
+
+void AKBLobbyHud::DrawManualJoin(const FBox2D& Panel)
+{
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+	if (!Font || !Canvas)
+	{
+		return;
+	}
+
+	const float Left = Panel.Min.X + Style::Pad;
+	const float Width = Style::PanelWidth - Style::Pad * 2.f;
+
+	// Stacked upward from the status line, which itself sits above the buttons. Everything here
+	// is anchored to the bottom of the panel so it does not move when the lists above it change
+	// length - the same reason DrawStatusLine and DrawButtons are.
+	const float StatusY = Panel.Min.Y + Style::PanelHeight - Style::Pad - Style::ButtonHeight - 40.f;
+	const float RowY = StatusY - 44.f;
+	const float AddressY = RowY - 30.f;
+
+	// ---- This machine's address, with a way to send it to the other player ------------------
+	const FString Preferred = GetPreferredLocalAddress();
+	DrawText(Preferred.IsEmpty() ? TEXT("本机地址：没找到（没联网？）")
+	                             : FString::Printf(TEXT("本机地址：%s"), *Preferred),
+		Preferred.IsEmpty() ? Style::Faint : Style::Ink, Left, AddressY, Font, 0.95f, false);
+
+	if (!Preferred.IsEmpty())
+	{
+		// The other candidates, dim. Shown rather than hidden because a machine with a VM or
+		// WSL has several and only one of them is reachable from the other player - so if the
+		// first one does not work, there has to be something to try next.
+		if (LocalAddresses.Num() > 1)
+		{
+			TArray<FString> Others(LocalAddresses);
+			Others.RemoveAt(0);
+			DrawText(FString::Printf(TEXT("（其它：%s）"), *FString::Join(Others, TEXT(" "))),
+				Style::Faint, Left + 220.f, AddressY + 2.f, Font, 0.85f, false);
+		}
+
+		const FBox2D CopyRect(FVector2D(Panel.Max.X - Style::Pad - 72.f, AddressY - 4.f),
+		                      FVector2D(Panel.Max.X - Style::Pad, AddressY + 24.f));
+		ButtonRects[static_cast<int32>(EKBLobbyButton::CopyAddress)] =
+			DrawButton(CopyRect, TEXT("复制"), true, IsHovered(CopyRect));
+	}
+
+	// ---- Join by hand ----------------------------------------------------------------------
+	const FBox2D JoinRect(FVector2D(Left, RowY), FVector2D(Left + Width, RowY + 30.f));
+	ButtonRects[static_cast<int32>(EKBLobbyButton::ManualJoin)] = JoinRect;
+
+	if (bTypingAddress)
+	{
+		DrawRect(Style::RowHover, JoinRect.Min.X, JoinRect.Min.Y,
+			JoinRect.Max.X - JoinRect.Min.X, JoinRect.Max.Y - JoinRect.Min.Y);
+
+		// A caret, because a text field with no cursor reads as a label.
+		DrawText(FString::Printf(TEXT("主机地址：%s_"), *AddressBuffer), Style::Ink,
+			JoinRect.Min.X + 10.f, RowY + 5.f, Font, 1.0f, false);
+
+		DrawText(TEXT("回车加入　Esc 取消　Ctrl+V 粘贴"), Style::Dim,
+			JoinRect.Max.X - 300.f, RowY + 6.f, Font, 0.9f, false);
+	}
+	else
+	{
+		const bool bHovered = IsHovered(JoinRect);
+		DrawRect(bHovered ? Style::RowHover : Style::RowFill, JoinRect.Min.X, JoinRect.Min.Y,
+			JoinRect.Max.X - JoinRect.Min.X, JoinRect.Max.Y - JoinRect.Min.Y);
+
+		DrawText(TEXT("搜不到房间？点这里手动输入主机地址"), Style::Dim,
+			JoinRect.Min.X + 10.f, RowY + 5.f, Font, 0.95f, false);
 	}
 }
 

@@ -7,6 +7,7 @@
 #include "Swarm/KBEnemyDirector.h"
 #include "Swarm/KBEnemyVisualizerComponent.h"
 #include "Core/KBGameState.h"
+#include "Core/KBPlayerController.h"
 #include "Core/KBPlayerState.h"
 #include "Data/KBCardDefinition.h"
 #include "Data/KBWeaponDefinition.h"
@@ -100,6 +101,24 @@ namespace
 	 * a Latin one, so the count that looks right for English overflows the panel badly here.
 	 */
 	constexpr int32 CardDescriptionCharsPerLine = 15;
+
+	/**
+	 * Backpack panel and hotbar geometry.
+	 *
+	 * Plain constants rather than UPROPERTY(EditDefaultsOnly) like the older entries above,
+	 * because this class has no Blueprint subclass and such a property is not editable anywhere
+	 * - it would only look tunable. Same choice the lobby HUD made, and the same reason.
+	 */
+	constexpr float BackpackMargin = 24.f;
+	constexpr float BackpackWidth = 300.f;
+	constexpr float BackpackRowHeight = 44.f;
+	constexpr float BackpackRowGap = 6.f;
+	constexpr float BackpackHeaderHeight = 74.f;
+	constexpr float BackpackMenuRowHeight = 30.f;
+
+	constexpr float HotbarSlotSize = 56.f;
+	constexpr float HotbarSlotGap = 8.f;
+	constexpr float HotbarBottomMargin = 20.f;
 }
 
 AKBHud::AKBHud()
@@ -117,6 +136,11 @@ void AKBHud::DrawHUD()
 	}
 
 	CardRects.Reset();
+	BackpackRows.Reset();
+	BackpackRowRects.Reset();
+	BackpackMenuActions.Reset();
+	BackpackMenuRects.Reset();
+	HotbarSlotRects.Reset();
 
 	// The run is over: the summary replaces everything else rather than sitting on top of it.
 	// Health bars over bugs and a draft panel would both be noise at this point, and leaving
@@ -140,6 +164,12 @@ void AKBHud::DrawHUD()
 	DrawExtractionZone();
 	DrawRunReadout();
 	DrawPartyStatus();
+
+	// The backpack panel and its hotbar. Before the extraction announcement and the card draft,
+	// both of which are more urgent than a bag the player opened on purpose.
+	DrawBackpackPanel();
+	DrawHotbar();
+
 	// Last before the draft panel: the announcement is the lowest-priority thing on screen, and
 	// the cards have to be readable over it.
 	DrawExtractionIndicator();
@@ -752,21 +782,24 @@ void AKBHud::DrawRunSummary()
 	if (LocalPlayerState)
 	{
 		const int32 Carried = LocalPlayerState->GetMaterials();
+		const int32 CarriedMedkits = LocalPlayerState->GetMedkits();
 
+		// Medkits are named beside the materials because a wipe now costs them too, and "you
+		// lost 3 medkits" is a different sentence from "you lost 120 materials".
 		FString LootLine;
 		FLinearColor LootColour;
 
 		if (Result == EKBRunResult::Extracted)
 		{
-			LootLine = FString::Printf(TEXT("带出材料 %d"), Carried);
+			LootLine = FString::Printf(TEXT("带出材料 %d      药包 %d"), Carried, CarriedMedkits);
 			LootColour = FLinearColor(0.36f, 0.74f, 0.46f, 1.f);
 		}
 		else if (Result == EKBRunResult::WipedOut)
 		{
-			LootLine = Carried > 0
-				? FString::Printf(TEXT("损失材料 %d"), Carried)
+			LootLine = (Carried > 0 || CarriedMedkits > 0)
+				? FString::Printf(TEXT("损失材料 %d      药包 %d"), Carried, CarriedMedkits)
 				: TEXT("什么也没带出来");
-			LootColour = Carried > 0
+			LootColour = (Carried > 0 || CarriedMedkits > 0)
 				? FLinearColor(0.90f, 0.36f, 0.32f, 1.f)
 				: FLinearColor(0.45f, 0.48f, 0.55f, 1.f);
 		}
@@ -987,11 +1020,25 @@ void AKBHud::DrawRunReadout()
 		Dim, ReadoutMargin, Y, SmallFont, 1.0f, false);
 	Y += 26.f;
 
-	// Carried materials, shown at zero as well. The number is what tells the player that the
+	// What is being carried, shown at zero as well. The number is what tells the player that the
 	// things on the ground are worth walking to, and a readout that only appears once you have
 	// some teaches nothing to the player who has none.
-	DrawText(FString::Printf(TEXT("材料 %d"), PlayerState->GetMaterials()),
-		PlayerState->GetMaterials() > 0 ? Ink : Dim, ReadoutMargin, Y, SmallFont, 1.0f, false);
+	const int32 Weight = PlayerState->GetCarriedWeight();
+	const int32 Capacity = PlayerState->GetBackpackCapacity();
+
+	DrawText(FString::Printf(TEXT("材料 %d      药包 %d"), PlayerState->GetMaterials(), PlayerState->GetMedkits()),
+		(PlayerState->GetMaterials() > 0 || PlayerState->GetMedkits() > 0) ? Ink : Dim,
+		ReadoutMargin, Y, SmallFont, 1.0f, false);
+	Y += 24.f;
+
+	// The one number that decides whether the next thing on the ground is worth walking to. Red
+	// at the cap, reusing the summary screen's warning colour - an inline literal rather than a
+	// new name in the anonymous namespace above, which is exactly where KBHud.cpp and
+	// KBLobbyHud.cpp collided under unity builds before.
+	const bool bFull = Weight >= Capacity;
+	DrawText(FString::Printf(TEXT("重量 %d / %d"), Weight, Capacity),
+		bFull ? FLinearColor(0.90f, 0.36f, 0.32f, 1.f) : Dim,
+		ReadoutMargin, Y, SmallFont, 0.95f, false);
 	Y += 34.f;
 
 	const APawn* Pawn = PlayerController->GetPawn();
@@ -1065,6 +1112,261 @@ void AKBHud::DrawRunReadout()
 			}
 		}
 	}
+}
+
+void AKBHud::DrawHotbar()
+{
+	const APlayerController* PlayerController = GetOwningPlayerController();
+	const AKBPlayerController* KBController = Cast<AKBPlayerController>(PlayerController);
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+
+	if (!Canvas || !Font || !KBController)
+	{
+		return;
+	}
+
+	const AKBPlayerState* PlayerState = PlayerController->GetPlayerState<AKBPlayerState>();
+	constexpr int32 Slots = AKBPlayerController::HotbarSlots;
+
+	const float TotalWidth = Slots * HotbarSlotSize + (Slots - 1) * HotbarSlotGap;
+	const float StartX = (Canvas->SizeX - TotalWidth) * 0.5f;
+	const float Y = Canvas->SizeY - HotbarBottomMargin - HotbarSlotSize;
+
+	// The bar is always on screen, not only when the panel is open: it is the answer to "which
+	// key uses what", and a key reference you have to open a menu to read is not a reference.
+	int32 PickedIndex = INDEX_NONE;
+	const AKBPlayerController::EKBBackpackPick PickedKind = KBController->GetBackpackPick(PickedIndex);
+
+	for (int32 SlotIndex = 0; SlotIndex < Slots; ++SlotIndex)
+	{
+		const float X = StartX + SlotIndex * (HotbarSlotSize + HotbarSlotGap);
+
+		const FBox2D SlotRect(FVector2D(X, Y), FVector2D(X + HotbarSlotSize, Y + HotbarSlotSize));
+		HotbarSlotRects.Add(SlotRect);
+
+		// The slot being carried around by the click-to-move gesture, lit up so it is obvious
+		// what is in hand and what a second click will swap it with.
+		const bool bPicked = PickedKind == AKBPlayerController::EKBBackpackPick::HotbarSlot
+			&& PickedIndex == SlotIndex;
+
+		DrawRect(bPicked ? PanelHover : PanelFill, X, Y, HotbarSlotSize, HotbarSlotSize);
+
+		// The key number, small and dim in the corner, so it reads as a binding rather than as
+		// part of the item's name.
+		DrawText(FString::Printf(TEXT("%d"), SlotIndex + 1), Dim, X + 5.f, Y + 2.f, Font, 0.75f, false);
+
+		EKBItemType Type;
+		if (!KBController->GetHotbarSlot(SlotIndex, Type))
+		{
+			continue;
+		}
+
+		const int32 Count = !PlayerState ? 0
+			: (Type == EKBItemType::Medkit ? PlayerState->GetMedkits() : PlayerState->GetMaterials());
+
+		// Dimmed at zero rather than hidden: the slot is still assigned, and "I have none left"
+		// is a different thing from "that key does nothing".
+		DrawText(KBItemDisplayName(Type), Count > 0 ? Ink : Dim,
+			X + 7.f, Y + HotbarSlotSize * 0.5f - 9.f, Font, 0.85f, false);
+
+		if (Count > 0)
+		{
+			const FString CountText = FString::Printf(TEXT("%d"), Count);
+			float CountWidth = 0.f;
+			float CountHeight = 0.f;
+			GetTextSize(CountText, CountWidth, CountHeight, Font, 0.8f);
+			DrawText(CountText, Dim, X + HotbarSlotSize - 6.f - CountWidth, Y + HotbarSlotSize - 20.f,
+				Font, 0.8f, false);
+		}
+	}
+}
+
+void AKBHud::DrawBackpackPanel()
+{
+	const APlayerController* PlayerController = GetOwningPlayerController();
+	const AKBPlayerController* KBController = Cast<AKBPlayerController>(PlayerController);
+	UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+
+	if (!Canvas || !Font || !KBController || !KBController->IsBackpackOpen())
+	{
+		return;
+	}
+
+	const AKBPlayerState* PlayerState = PlayerController->GetPlayerState<AKBPlayerState>();
+	if (!PlayerState)
+	{
+		return;
+	}
+
+	// Built once, used for both drawing and hit-testing - the same contract the lobby's shop
+	// rows follow. Building it twice is how a panel acts on the row above the one you clicked.
+	BuildBackpackRows(*PlayerState, BackpackRows);
+
+	const int32 Rows = FMath::Max(1, BackpackRows.Num());
+	const float PanelHeight = BackpackHeaderHeight + Rows * (BackpackRowHeight + BackpackRowGap);
+
+	// Anchored to the right edge, which nothing else in this HUD is: every other element is on
+	// the left, the centre or the bottom, so the panel has this whole side to itself.
+	const FBox2D Panel(
+		FVector2D(Canvas->SizeX - BackpackMargin - BackpackWidth, BackpackMargin),
+		FVector2D(Canvas->SizeX - BackpackMargin, BackpackMargin + PanelHeight));
+
+	DrawRect(PanelFill, Panel.Min.X, Panel.Min.Y, BackpackWidth, PanelHeight);
+
+	DrawText(TEXT("背包"), Ink, Panel.Min.X + 14.f, Panel.Min.Y + 10.f, Font, 1.15f, false);
+
+	// The weight line, reusing the readout's own language rather than inventing a second way to
+	// say the same number. Red at the cap: it is the one number that decides whether the next
+	// thing on the ground is worth walking to.
+	const int32 Weight = PlayerState->GetCarriedWeight();
+	const int32 Capacity = PlayerState->GetBackpackCapacity();
+	const FString WeightLine = FString::Printf(TEXT("重量 %d / %d"), Weight, Capacity);
+
+	float WeightWidth = 0.f;
+	float WeightHeight = 0.f;
+	GetTextSize(WeightLine, WeightWidth, WeightHeight, Font, 0.95f);
+	DrawText(WeightLine, Weight >= Capacity ? FLinearColor(0.90f, 0.36f, 0.32f, 1.f) : Dim,
+		Panel.Max.X - 14.f - WeightWidth, Panel.Min.Y + 12.f, Font, 0.95f, false);
+
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	const bool bHasMouse = PlayerController->GetMousePosition(MouseX, MouseY);
+	const FVector2D Cursor(MouseX, MouseY);
+
+	int32 PickIndex = INDEX_NONE;
+	const AKBPlayerController::EKBBackpackPick PickKind = KBController->GetBackpackPick(PickIndex);
+
+	if (BackpackRows.Num() == 0)
+	{
+		DrawText(TEXT("背包是空的"), Dim, Panel.Min.X + 14.f, Panel.Min.Y + BackpackHeaderHeight - 26.f,
+			Font, 0.95f, false);
+		return;
+	}
+
+	for (int32 Index = 0; Index < BackpackRows.Num(); ++Index)
+	{
+		const FKBBackpackRow& Row = BackpackRows[Index];
+		const float RowY = Panel.Min.Y + BackpackHeaderHeight + Index * (BackpackRowHeight + BackpackRowGap);
+		const FBox2D RowRect(FVector2D(Panel.Min.X + 10.f, RowY),
+		                     FVector2D(Panel.Max.X - 10.f, RowY + BackpackRowHeight));
+
+		// Lit while held by the click-to-move gesture, hovered otherwise - the two are different
+		// states and only one of them means "clicking again will move this".
+		const bool bPicked = PickKind == AKBPlayerController::EKBBackpackPick::BackpackRow
+			&& PickIndex == Index;
+		const bool bHovered = bHasMouse && RowRect.IsInside(Cursor);
+
+		DrawRect((bPicked || bHovered) ? PanelHover : FLinearColor(0.11f, 0.13f, 0.18f, 0.95f),
+			RowRect.Min.X, RowRect.Min.Y, RowRect.Max.X - RowRect.Min.X, RowRect.Max.Y - RowRect.Min.Y);
+
+		DrawText(Row.Label, Ink, RowRect.Min.X + 10.f, RowY + BackpackRowHeight * 0.5f - 10.f,
+			Font, 1.0f, false);
+
+		float RightWidth = 0.f;
+		float RightHeight = 0.f;
+		GetTextSize(Row.RightLabel, RightWidth, RightHeight, Font, 0.9f);
+		DrawText(Row.RightLabel, Dim, RowRect.Max.X - 10.f - RightWidth,
+			RowY + BackpackRowHeight * 0.5f - 9.f, Font, 0.9f, false);
+
+		BackpackRowRects.Add(RowRect);
+	}
+
+	DrawText(TEXT("左键点起，再点热键栏放下　右键＝菜单　B 关闭"), Dim,
+		Panel.Min.X + 14.f, Panel.Max.Y - 24.f, Font, 0.85f, false);
+
+	// ---- The row menu ----------------------------------------------------------------------
+	const int32 MenuRow = KBController->GetOpenBackpackMenuRow();
+	if (!BackpackRows.IsValidIndex(MenuRow))
+	{
+		return;
+	}
+
+	const FKBBackpackRow& MenuRowData = BackpackRows[MenuRow];
+
+	// Materials offer no equip entry at all rather than a greyed-out one: a menu is a promise
+	// about what you can do, and this cut has no verb that spends a material from your hand.
+	if (MenuRowData.bCanEquip)
+	{
+		BackpackMenuActions.Add(EKBBackpackAction::Equip);
+	}
+	BackpackMenuActions.Add(EKBBackpackAction::Drop);
+
+	const int32 EntryCount = BackpackMenuActions.Num();
+
+	const float MenuWidth = 150.f;
+	const float MenuHeight = EntryCount * BackpackMenuRowHeight;
+	const FVector2D Anchor = KBController->GetBackpackMenuPosition();
+
+	// Kept inside the screen: a menu that opens off the right edge cannot be clicked at all.
+	const float MenuX = FMath::Clamp(Anchor.X, 0.f, FMath::Max(0.f, Canvas->SizeX - MenuWidth));
+	const float MenuY = FMath::Clamp(Anchor.Y, 0.f, FMath::Max(0.f, Canvas->SizeY - MenuHeight));
+
+	DrawRect(FLinearColor(0.04f, 0.05f, 0.08f, 0.98f), MenuX, MenuY, MenuWidth, MenuHeight);
+
+	for (int32 Entry = 0; Entry < EntryCount; ++Entry)
+	{
+		const float EntryY = MenuY + Entry * BackpackMenuRowHeight;
+		const FBox2D EntryRect(FVector2D(MenuX, EntryY),
+		                       FVector2D(MenuX + MenuWidth, EntryY + BackpackMenuRowHeight));
+
+		const EKBBackpackAction Action = BackpackMenuActions[Entry];
+		const bool bHovered = bHasMouse && EntryRect.IsInside(Cursor);
+
+		if (bHovered)
+		{
+			DrawRect(PanelHover, EntryRect.Min.X, EntryRect.Min.Y, MenuWidth, BackpackMenuRowHeight);
+		}
+
+		DrawText(Action == EKBBackpackAction::Equip ? TEXT("装备到热键栏") : TEXT("丢弃一个"),
+			Ink, EntryRect.Min.X + 10.f, EntryY + BackpackMenuRowHeight * 0.5f - 9.f, Font, 0.95f, false);
+
+		BackpackMenuRects.Add(EntryRect);
+	}
+}
+
+int32 AKBHud::HitTestBackpackRow(const FVector2D& ScreenPosition) const
+{
+	for (int32 Index = 0; Index < BackpackRowRects.Num(); ++Index)
+	{
+		if (BackpackRowRects[Index].IsInside(ScreenPosition))
+		{
+			return Index;
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+EKBBackpackAction AKBHud::HitTestBackpackMenu(const FVector2D& ScreenPosition) const
+{
+	for (int32 Index = 0; Index < BackpackMenuRects.Num(); ++Index)
+	{
+		if (BackpackMenuRects[Index].IsInside(ScreenPosition))
+		{
+			return BackpackMenuActions.IsValidIndex(Index) ? BackpackMenuActions[Index]
+			                                               : EKBBackpackAction::None;
+		}
+	}
+
+	return EKBBackpackAction::None;
+}
+
+int32 AKBHud::HitTestHotbarSlot(const FVector2D& ScreenPosition) const
+{
+	for (int32 Index = 0; Index < HotbarSlotRects.Num(); ++Index)
+	{
+		if (HotbarSlotRects[Index].IsInside(ScreenPosition))
+		{
+			return Index;
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+const FKBBackpackRow* AKBHud::GetBackpackRow(int32 Index) const
+{
+	return BackpackRows.IsValidIndex(Index) ? &BackpackRows[Index] : nullptr;
 }
 
 void AKBHud::DrawCardDraft()

@@ -2,6 +2,7 @@
 
 #include "Combat/KBStatSheetComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Containers/Ticker.h"
 #include "Core/KBPlayerState.h"
 #include "Data/KBEnemyArchetype.h"
 #include "Engine/StaticMesh.h"
@@ -93,9 +94,14 @@ void AKBLootDirector::RollDropForDeath(const FVector& DeathLocation, const UKBEn
 
 	// The test switch short-circuits both rolls. Checked here rather than at the call site so
 	// there is one place that decides what a death produces.
+	//
+	// It forces the MATERIAL branch, which is what its cvar help says. It used to force the medkit
+	// branch instead, because the medkit roll came first and the early return swallowed it - so a
+	// test that meant to fill the ground with loot filled it with medkits, and (now that medkits
+	// occupy backpack weight) would have blocked the capacity it was meant to be testing.
 	const bool bForce = CVarKBLootForceDrop.GetValueOnGameThread() != 0;
 
-	if (bForce || FMath::FRand() < Archetype.MedkitDropChance)
+	if (!bForce && FMath::FRand() < Archetype.MedkitDropChance)
 	{
 		SpawnDrop(DeathLocation, EKBItemType::Medkit, 1);
 		return;
@@ -208,26 +214,51 @@ void AKBLootDirector::TickPickups()
 
 			const EKBItemType Type = static_cast<EKBItemType>(Drop.Type);
 
-			// A medkit at full health is left where it is. Picking it up would spend it for
-			// nothing, and an automatic pickup means the player never chose to - so the choice is
-			// made for them, and it is "not yet".
-			if (Type == EKBItemType::Medkit && Stats->GetHealthFraction() >= 1.f)
+			AKBPlayerState* MutablePlayerState = PlayerController->GetPlayerState<AKBPlayerState>();
+			if (!MutablePlayerState)
 			{
+				continue;
+			}
+
+			// Everything picked up now goes into the backpack, and whether it fits is the
+			// backpack's decision - not this loop's. Materials and medkits differ only in what
+			// they are worth on the way in; a medkit used to heal on contact, which is exactly
+			// what this cut removes (the full-health rule moved to USE time, where the player
+			// makes the call instead of the game making it for them).
+			FString Reason;
+			const bool bTaken = Type == EKBItemType::Medkit
+				? MutablePlayerState->TryAddMedkits(Drop.Count, Reason)
+				: MutablePlayerState->TryAddMaterials(Drop.Count, Reason);
+
+			if (!bTaken)
+			{
+				// Left on the ground, and said out loud - once a second rather than once a frame
+				// per drop, because a full backpack next to a pile would otherwise write a line
+				// per item per frame. Silence here is the "I walked over it and nothing happened"
+				// bug; a flood is the other way to make the same information useless.
+				const UWorld* LogWorld = GetWorld();
+				const float Now = LogWorld ? LogWorld->GetTimeSeconds() : 0.f;
+				if (Now - LastRefusalLogTime > 1.f)
+				{
+					LastRefusalLogTime = Now;
+					UE_LOG(LogKillBugs, Display, TEXT("KB Loot: %s left %s x%d on the ground - %s"),
+						*GetNameSafe(Pawn),
+						Type == EKBItemType::Medkit ? TEXT("medkit") : TEXT("material"),
+						Drop.Count, *Reason);
+				}
+
 				continue;
 			}
 
 			if (Type == EKBItemType::Medkit)
 			{
-				const float Before = Stats->GetHealth();
-				Stats->Heal(KBSettings().MedkitHealAmount);
-
-				UE_LOG(LogKillBugs, Display, TEXT("KB Loot: %s picked up a medkit (health %.0f -> %.0f)"),
-					*GetNameSafe(Pawn), Before, Stats->GetHealth());
+				UE_LOG(LogKillBugs, Display,
+					TEXT("KB Loot: %s picked up medkit x%d (carrying %d, weight %d/%d)"),
+					*GetNameSafe(Pawn), Drop.Count, MutablePlayerState->GetMedkits(),
+					MutablePlayerState->GetCarriedWeight(), MutablePlayerState->GetBackpackCapacity());
 			}
-			else if (AKBPlayerState* MutablePlayerState = PlayerController->GetPlayerState<AKBPlayerState>())
+			else
 			{
-				MutablePlayerState->AddMaterials(Drop.Count);
-
 				// Display, not Verbose: a pickup is an event of the same order as a knockdown or a
 				// completed channel, and a headless run has no other way to see that the radius
 				// gate let one through. Walk over a kill field and this is a few lines a second,
@@ -238,7 +269,8 @@ void AKBLootDirector::TickPickups()
 
 			// Removed here, so a second player standing in the same place cannot also take it.
 			// First come, first served, resolved serially on the server - there is no contention
-			// and no race, and that is worth stating rather than leaving implicit.
+			// and no race, and that is worth stating rather than leaving implicit. Note it only
+			// happens when the take SUCCEEDED: a drop that did not fit stays for the next attempt.
 			Drops.Items.RemoveAt(Index);
 			Drops.MarkArrayDirty();
 		}
@@ -481,8 +513,11 @@ namespace KBLootCommands
 
 			if (PlayerState)
 			{
-				UE_LOG(LogKillBugs, Display, TEXT("  player %d carries %d material(s)"),
-					PlayerState->GetKBPlayerIndex(), PlayerState->GetMaterials());
+				UE_LOG(LogKillBugs, Display,
+					TEXT("  player %d carries %d material(s) and %d medkit(s), weight %d/%d"),
+					PlayerState->GetKBPlayerIndex(), PlayerState->GetMaterials(),
+					PlayerState->GetMedkits(),
+					PlayerState->GetCarriedWeight(), PlayerState->GetBackpackCapacity());
 			}
 		}
 	}
@@ -543,10 +578,20 @@ namespace KBLootCommands
 
 		// The KB.Profile.AddGold analogue: a way to reach the bank tests without walking to a
 		// drop. The drop-and-pickup path has its own commands above.
-		PlayerState->AddMaterials(FCString::Atoi(*Args[0]));
+		//
+		// Capacity-gated like the real thing. It would be easy to leave this as a bypass, and
+		// that would quietly make every capacity test meaningless.
+		const int32 Amount = FCString::Atoi(*Args[0]);
+		FString Reason;
+		if (!PlayerState->TryAddMaterials(Amount, Reason))
+		{
+			UE_LOG(LogKillBugs, Display, TEXT("KB Loot: +%d material(s) refused - %s"), Amount, *Reason);
+			return;
+		}
 
-		UE_LOG(LogKillBugs, Display, TEXT("KB Loot: +%d material(s) carried (now %d)"),
-			FCString::Atoi(*Args[0]), PlayerState->GetMaterials());
+		UE_LOG(LogKillBugs, Display, TEXT("KB Loot: +%d material(s) carried (now %d, weight %d/%d)"),
+			Amount, PlayerState->GetMaterials(),
+			PlayerState->GetCarriedWeight(), PlayerState->GetBackpackCapacity());
 	}
 }
 
@@ -566,3 +611,348 @@ static FAutoConsoleCommandWithWorldAndArgs KBConsoleLootGive(
 	TEXT("KB.Loot.Give <n> - add n materials to the local player without walking anywhere, for "
 	     "the banking tests."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&KBLootCommands::Give));
+
+// ---------------------------------------------------------------------------------------------
+// Backpack self test
+// ---------------------------------------------------------------------------------------------
+
+namespace KBBackpackCommands
+{
+	/**
+	 * Walks the backpack through everything that changed, one step per log line, on a ticker.
+	 *
+	 * `-ExecCmds` fires once in one frame, so "put a medkit on the ground and look again half a
+	 * second later" cannot be expressed as a command line - the same problem the extraction self
+	 * test has, and the same answer.
+	 *
+	 * It runs against the REAL pickup loop and the REAL mutators rather than a shortcut: the
+	 * steps drive `SpawnDrop` and then wait for `TickPickups` to run, because "the drop entered
+	 * the backpack instead of healing" is a claim about that loop, not about the setter.
+	 *
+	 * Runs during Warmup, where nothing spawns and nothing attacks, so health is exactly what
+	 * this test sets it to.
+	 */
+	struct FSelfTest
+	{
+		TWeakObjectPtr<UWorld> World;
+		TWeakObjectPtr<AKBPlayerState> PlayerState;
+		TWeakObjectPtr<AKBLootDirector> Loot;
+
+		AKBPlayerState* State() const { return PlayerState.Get(); }
+		AKBLootDirector* Director() const { return Loot.Get(); }
+
+		float StartTime = 0.f;
+		int32 Step = 0;
+
+		/** Counters carried between steps. */
+		int32 MedkitsAtStart = 0;
+		int32 HealthAtStart = 0.f;
+		int32 DropIdUnderTest = INDEX_NONE;
+		FString LastReason;
+
+		bool Advance(float DeltaSeconds);
+		bool Ready() const { return World.IsValid() && State() && Director(); }
+		int32 DropCount() const;
+		bool HasDropWithId(int32 StableId) const;
+	};
+
+	int32 FSelfTest::DropCount() const
+	{
+		return Director() ? Director()->GetDrops().Items.Num() : 0;
+	}
+
+	bool FSelfTest::HasDropWithId(int32 StableId) const
+	{
+		if (!Director())
+		{
+			return false;
+		}
+
+		for (const FKBItemNetItem& Drop : Director()->GetDrops().Items)
+		{
+			if (Drop.StableId == StableId)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	bool FSelfTest::Advance(float DeltaSeconds)
+	{
+		UWorld* LiveWorld = World.Get();
+		AKBPlayerState* PlayerStatePtr = State();
+
+		if (!LiveWorld || !PlayerStatePtr || !Director())
+		{
+			UE_LOG(LogKillBugs, Warning, TEXT("Backpack.SelfTest: the world or the player went away"));
+			return false;
+		}
+
+		const UWorld* TimeWorld = LiveWorld;
+		const float Now = TimeWorld->GetTimeSeconds();
+		const float Since = Now - StartTime;
+
+		APawn* Pawn = PlayerStatePtr->GetPawn();
+		UKBStatSheetComponent* Stats = Pawn ? Pawn->FindComponentByClass<UKBStatSheetComponent>() : nullptr;
+
+		if (!Stats)
+		{
+			UE_LOG(LogKillBugs, Warning, TEXT("Backpack.SelfTest: no stat sheet"));
+			return false;
+		}
+
+		switch (Step)
+		{
+		case 0:
+			StartTime = Now;
+			MedkitsAtStart = PlayerStatePtr->GetMedkits();
+
+			// Hurt first, so the old behaviour is a real possibility the test can rule out: at
+			// full health the old code refused the medkit outright, and "nothing happened" would
+			// look like a pass.
+			Stats->ApplyDamage(80.f);
+			HealthAtStart = FMath::RoundToInt(Stats->GetHealth());
+
+			Director()->SpawnDrop(Pawn->GetActorLocation(), EKBItemType::Medkit, 1);
+
+			UE_LOG(LogKillBugs, Display,
+				TEXT("Backpack.SelfTest 1/8: a medkit on the ground must go INTO the backpack, not heal the ")
+				TEXT("player standing on it - health %.0f, medkits %d; expect health unchanged and medkits %d"),
+				Stats->GetHealth(), MedkitsAtStart, MedkitsAtStart + 1);
+
+			Step = 1;
+			break;
+
+		case 1:
+			if (Since < 0.5f)
+			{
+				break;
+			}
+			{
+				const bool bNoHeal = FMath::RoundToInt(Stats->GetHealth()) == HealthAtStart;
+				const bool bCarried = PlayerStatePtr->GetMedkits() == MedkitsAtStart + 1;
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 2/8: health %d (want %d - the instant heal must be GONE), ")
+					TEXT("medkits %d (want %d) -> %s"),
+					FMath::RoundToInt(Stats->GetHealth()), HealthAtStart,
+					PlayerStatePtr->GetMedkits(), MedkitsAtStart + 1,
+					(bNoHeal && bCarried) ? TEXT("PASS") : TEXT("FAIL"));
+			}
+
+			// Full health, so the next step tests the refusal rather than the heal.
+			Stats->Heal(0.f);
+			Step = 2;
+			break;
+
+		case 2:
+			if (Since < 1.0f)
+			{
+				break;
+			}
+			{
+				const int32 Before = PlayerStatePtr->GetMedkits();
+				FString Reason;
+				const bool bUsed = PlayerStatePtr->TryUseMedkit(Reason);
+				const bool bPass = !bUsed && PlayerStatePtr->GetMedkits() == Before;
+
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 3/8: using at FULL health must be refused and must not consume - ")
+					TEXT("used=%d, reason '%s', medkits %d -> %d (want unchanged) -> %s"),
+					bUsed, *Reason, Before, PlayerStatePtr->GetMedkits(),
+					bPass ? TEXT("PASS") : TEXT("FAIL"));
+			}
+
+			Stats->ApplyDamage(80.f);
+			Step = 3;
+			break;
+
+		case 3:
+			if (Since < 1.5f)
+			{
+				break;
+			}
+			{
+				const int32 HealthBefore = FMath::RoundToInt(Stats->GetHealth());
+				const int32 MedkitsBefore = PlayerStatePtr->GetMedkits();
+
+				FString Reason;
+				const bool bUsed = PlayerStatePtr->TryUseMedkit(Reason);
+				const int32 Expected = FMath::Min(
+					FMath::RoundToInt(KBSettings().MedkitHealAmount) + HealthBefore,
+					FMath::RoundToInt(Stats->GetMaxHealth()));
+
+				const bool bPass = bUsed
+					&& PlayerStatePtr->GetMedkits() == MedkitsBefore - 1
+					&& FMath::RoundToInt(Stats->GetHealth()) == Expected;
+
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 4/8: using below full health must heal exactly %.0f ONCE and spend ")
+					TEXT("one - used=%d, health %d -> %d (want %d), medkits %d -> %d (want %d) -> %s"),
+					KBSettings().MedkitHealAmount, bUsed, HealthBefore,
+					FMath::RoundToInt(Stats->GetHealth()), Expected,
+					MedkitsBefore, PlayerStatePtr->GetMedkits(), MedkitsBefore - 1,
+					bPass ? TEXT("PASS") : TEXT("FAIL"));
+			}
+			Step = 4;
+			break;
+
+		case 4:
+			if (Since < 2.0f)
+			{
+				break;
+			}
+			{
+				// Drain whatever is left, so "none carried" is reachable without pretending.
+				//
+				// Each pass lands the player on exactly 1 health before healing: never 0, because
+				// a downed player is REFUSED by TryUseMedkit (倒地时不能用) and the loop would spin
+				// without consuming anything - which is what the first version of this test did.
+				int32 Guard = 0;
+				FString Reason;
+				while (PlayerStatePtr->GetMedkits() > 0 && Guard++ < 64)
+				{
+					Stats->ApplyDamage(FMath::Max(Stats->GetHealth() - 1.f, 0.f));
+					PlayerStatePtr->TryUseMedkit(Reason);
+				}
+
+				LastReason.Reset();
+				const bool bUsed = PlayerStatePtr->TryUseMedkit(LastReason);
+				const bool bPass = !bUsed && PlayerStatePtr->GetMedkits() == 0
+					&& LastReason == TEXT("没有药包");
+
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 5/8: with none carried the use must be refused - used=%d, ")
+					TEXT("reason '%s' (want 没有药包), medkits %d -> %s"),
+					bUsed, *LastReason, PlayerStatePtr->GetMedkits(),
+					bPass ? TEXT("PASS") : TEXT("FAIL"));
+			}
+			Step = 5;
+			break;
+
+		case 5:
+			if (Since < 2.5f)
+			{
+				break;
+			}
+			{
+				const int32 Capacity = PlayerStatePtr->GetBackpackCapacity();
+				const int32 Weight = PlayerStatePtr->GetCarriedWeight();
+				const int32 Unit = FMath::Max(1, KBSettings().MaterialUnitWeight);
+
+				FString Reason;
+				const bool bFilled = PlayerStatePtr->TryAddMaterials(Capacity - Weight - Unit, Reason);
+
+				// Then the boundary itself: exactly one unit short must still fit.
+				const bool bAtEdge = PlayerStatePtr->TryAddMaterials(Unit, Reason);
+				const bool bPass = bFilled && bAtEdge && PlayerStatePtr->GetCarriedWeight() == Capacity;
+
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 6/8: filling must stop exactly AT the limit (the check is inclusive) - ")
+					TEXT("capacity %d, weight now %d (want %d) -> %s"),
+					Capacity, PlayerStatePtr->GetCarriedWeight(), Capacity,
+					bPass ? TEXT("PASS") : TEXT("FAIL"));
+			}
+			Step = 6;
+			break;
+
+		case 6:
+			if (Since < 3.0f)
+			{
+				break;
+			}
+			{
+				const int32 Before = DropCount();
+				Director()->SpawnDrop(Pawn->GetActorLocation(), EKBItemType::Material, 1);
+				DropIdUnderTest = Director() && Director()->GetDrops().Items.Num() > Before
+					? Director()->GetDrops().Items.Last().StableId
+					: INDEX_NONE;
+
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 7/8: a drop that does not fit must STAY on the ground (drops %d, ")
+					TEXT("weight %d/%d)"),
+					Before, PlayerStatePtr->GetCarriedWeight(), PlayerStatePtr->GetBackpackCapacity());
+			}
+			Step = 7;
+			break;
+
+		case 7:
+			if (Since < 3.8f)
+			{
+				break;
+			}
+			{
+				const bool bStillThere = HasDropWithId(DropIdUnderTest);
+				const int32 Materials = PlayerStatePtr->GetMaterials();
+
+				UE_LOG(LogKillBugs, Display,
+					TEXT("Backpack.SelfTest 8/8: the refused drop is still on the ground=%d (want 1) and was ")
+					TEXT("NOT added (materials %d, weight %d/%d) -> %s"),
+					bStillThere, Materials,
+					PlayerStatePtr->GetCarriedWeight(), PlayerStatePtr->GetBackpackCapacity(),
+					bStillThere ? TEXT("PASS") : TEXT("FAIL"));
+			}
+
+			UE_LOG(LogKillBugs, Display, TEXT("Backpack.SelfTest: done"));
+			return false;
+
+		default:
+			return false;
+		}
+
+		return true;
+	}
+} // namespace KBBackpackCommands
+
+void AKBLootDirector::ConsoleBackpackSelfTest(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	AKBPlayerState* PlayerState = nullptr;
+	if (const APlayerController* PlayerController = World->GetFirstPlayerController())
+	{
+		PlayerState = PlayerController->GetPlayerState<AKBPlayerState>();
+	}
+
+	for (TActorIterator<AKBLootDirector> It(World); It; ++It)
+	{
+		if (!PlayerState)
+		{
+			UE_LOG(LogKillBugs, Warning, TEXT("Backpack.SelfTest: no local player state"));
+			return;
+		}
+
+		TSharedPtr<KBBackpackCommands::FSelfTest> Test = MakeShared<KBBackpackCommands::FSelfTest>();
+		Test->World = World;
+		Test->PlayerState = PlayerState;
+		Test->Loot = *It;
+
+		UE_LOG(LogKillBugs, Display, TEXT("Backpack.SelfTest: started"));
+
+		FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([Test](float DeltaSeconds) -> bool
+			{
+				return Test->Advance(DeltaSeconds);
+			}));
+		return;
+	}
+
+	UE_LOG(LogKillBugs, Warning, TEXT("No AKBLootDirector in this world"));
+}
+
+// Named uniquely across the whole module on purpose. The editor target has unity build OFF, so a
+// second file-scope static with this name would compile there; the PACKAGING target has unity ON,
+// which concatenates several .cpp files into ONE translation unit - and then two different
+// KB.Backpack tests declaring the same static is a redefinition. It cost a packaging round to
+// find, and only because the game target had never been compiled before.
+static FAutoConsoleCommandWithWorldAndArgs KBConsoleBackpackWeightTest(
+	TEXT("KB.Backpack.SelfTest"),
+	TEXT("KB.Backpack.SelfTest - one command walks the whole carried-backpack chain: a medkit goes ")
+	TEXT("into the pack instead of healing, use is refused at full health and with none carried, a ")
+	TEXT("use heals exactly once, the weight limit is inclusive, and a drop that does not fit stays ")
+	TEXT("on the ground. Eight steps, each logging what it proves."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AKBLootDirector::ConsoleBackpackSelfTest));

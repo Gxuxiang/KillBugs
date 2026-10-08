@@ -122,8 +122,27 @@ void UKBWeaponInventoryComponent::BeginPlay()
 
 	const int32 Equipped = ApplyLoadout(Profile->GetStash());
 
-	UE_LOG(LogKillBugs, Display, TEXT("Loadout: %d weapon(s) carried in (%d owned)"),
-		Equipped, Profile->GetStash().Num());
+	// Carrying nothing in is a legitimate state - a wipe can take everything, and buying a weapon
+	// deliberately does not equip it - but from the player's seat it is indistinguishable from a
+	// broken loadout. It is also the state that has no other symptom: the run simply starts with
+	// no gun and nothing says why. So say why, and say which of the two causes it is.
+	const int32 Owned = Profile->GetStash().Num();
+
+	if (Equipped == 0)
+	{
+		UE_LOG(LogKillBugs, Warning,
+			TEXT("Loadout: 0 weapon(s) carried in (%d owned) - this pawn enters with NO WEAPON. "
+			     "A run only carries weapons that are equipped in the lobby shop (%s)"),
+			Owned,
+			Owned > 0
+				? TEXT("some are owned: click each weapon's own row, the one labelled 点此带上")
+				: TEXT("the stash is empty: buy one, then click its own row to equip it"));
+	}
+	else
+	{
+		UE_LOG(LogKillBugs, Display, TEXT("Loadout: %d weapon(s) carried in (%d owned)"),
+			Equipped, Owned);
+	}
 	for (const FKBOwnedWeapon& Weapon : Weapons)
 	{
 		UE_LOG(LogKillBugs, Display, TEXT("    %s  %s / %s  dmg %.1f @ %.2fs"),

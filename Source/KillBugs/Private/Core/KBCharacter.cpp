@@ -7,6 +7,7 @@
 #include "Core/KBPlayerController.h"
 #include "Core/KBPlayerState.h"
 #include "EnhancedInputComponent.h"
+#include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/PlayerController.h"
@@ -15,8 +16,10 @@
 #include "KBConsoleVariables.h"
 #include "KBGameSettings.h"
 #include "KillBugs.h"
+#include "Loot/KBLootDirector.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
+#include "UI/KBBackpackModel.h"
 
 AKBCharacter::AKBCharacter()
 {
@@ -485,6 +488,15 @@ void AKBCharacter::StartFire(const FInputActionValue& Value)
 			bFireHeld = false;
 			return;
 		}
+
+		// Then the backpack, for the same reason: choosing an entry from a row's menu is a left
+		// click, and without this every "drop" would also put a bullet downrange. Only a click
+		// that lands on the panel is consumed, so clicking empty space still fires.
+		if (KBController->TryHandleBackpackClick())
+		{
+			bFireHeld = false;
+			return;
+		}
 	}
 
 	bFireHeld = true;
@@ -501,6 +513,194 @@ bool AKBCharacter::IsCardDraftOpen() const
 void AKBCharacter::StopFire(const FInputActionValue& Value)
 {
 	bFireHeld = false;
+}
+
+void AKBCharacter::UseMedkit(const FInputActionValue& Value)
+{
+	RequestUseMedkit();
+}
+
+void AKBCharacter::RequestUseMedkit()
+{
+	// Unconditional, and that is deliberate: a Server RPC invoked on the authority runs locally,
+	// so the listen host and a connecting client take the same line. ServerPickCard relies on
+	// exactly this, and branching here would be the thing that broke on the host.
+	//
+	// Q and the hotbar converge here: both are "use this item", so there is one server entry
+	// point and one place a refusal is worded.
+	ServerUseItem(EKBItemType::Medkit);
+}
+
+bool AKBCharacter::ServerUseItem_Validate(EKBItemType Type)
+{
+	return true;
+}
+
+void AKBCharacter::ServerUseItem_Implementation(EKBItemType Type)
+{
+	AKBPlayerState* KBPlayerState = GetPlayerState<AKBPlayerState>();
+	if (!KBPlayerState)
+	{
+		return;
+	}
+
+	FString Reason;
+	bool bUsed = false;
+
+	switch (Type)
+	{
+	case EKBItemType::Medkit:
+		bUsed = KBPlayerState->TryUseMedkit(Reason);
+		break;
+
+	default:
+		// Materials are currency: there is no verb that spends one from your hand. The hotbar
+		// refuses to hold them (see KBIsUsableItem), so this is the belt to that braces.
+		Reason = TEXT("这个东西不能用");
+		break;
+	}
+
+	if (!bUsed)
+	{
+		// Logged, not swallowed. "I pressed the key and nothing happened" is the symptom this
+		// whole feature produces when a refusal is silent - and the reasons are ordinary ones
+		// (full health, none left, downed), so they are Display, not Warning.
+		UE_LOG(LogKillBugs, Display, TEXT("KB Backpack: use refused - %s"), *Reason);
+	}
+}
+
+bool AKBCharacter::ServerDropItem_Validate(EKBItemType Type)
+{
+	return true;
+}
+
+void AKBCharacter::ServerDropItem_Implementation(EKBItemType Type)
+{
+	AKBPlayerState* KBPlayerState = GetPlayerState<AKBPlayerState>();
+	if (!KBPlayerState)
+	{
+		return;
+	}
+
+	FString Reason;
+	const bool bRemoved = Type == EKBItemType::Medkit
+		? KBPlayerState->TryRemoveMedkits(1, Reason)
+		: KBPlayerState->TryRemoveMaterials(1, Reason);
+
+	if (!bRemoved)
+	{
+		UE_LOG(LogKillBugs, Display, TEXT("KB Backpack: drop refused - %s"), *Reason);
+		return;
+	}
+
+	// Found by iteration rather than injected: this happens when a player asks for it, a few
+	// times a run, and an iterator over the handful of actors in the arena is not worth a
+	// lifetime-aware member. (AKBEnemyDirector gets it injected because it drops on every death.)
+	UWorld* World = GetWorld();
+	AKBLootDirector* Loot = nullptr;
+	for (TActorIterator<AKBLootDirector> It(World); It; ++It)
+	{
+		Loot = *It;
+		break;
+	}
+
+	if (!Loot)
+	{
+		// The item is already out of the backpack at this point, so say so - otherwise the
+		// player has lost an item to a silent failure.
+		UE_LOG(LogKillBugs, Warning,
+			TEXT("KB Backpack: no loot director - dropped %s is gone rather than on the ground"),
+			*KBItemDisplayName(Type));
+		return;
+	}
+
+	// IN FRONT, not at the feet. The pickup test is a per-frame 2D distance check, so a drop
+	// under the player is taken back on the very next frame and reads as "dropping does not
+	// work". The distance is a setting because it has to clear the card-boosted pickup radius.
+	FVector Direction = GetAimDirection();
+	if (Direction.IsNearlyZero())
+	{
+		Direction = GetActorForwardVector();
+	}
+	Direction.Z = 0.f;
+	Direction = Direction.GetSafeNormal();
+
+	const float Distance = FMath::Max(KBSettings().DroppedItemDistance, 0.f);
+	const FVector Location = GetActorLocation() + Direction * Distance;
+
+	Loot->SpawnDrop(Location, Type, 1);
+
+	UE_LOG(LogKillBugs, Display, TEXT("KB Backpack: dropped %s x1 %.0f units ahead (weight %d/%d)"),
+		*KBItemDisplayName(Type), Distance,
+		KBPlayerState->GetCarriedWeight(), KBPlayerState->GetBackpackCapacity());
+}
+
+void AKBCharacter::UseHotbarSlot(int32 SlotIndex)
+{
+	const AKBPlayerController* KBController = Cast<AKBPlayerController>(GetController());
+
+	EKBItemType Type;
+	if (!KBController || !KBController->GetHotbarSlot(SlotIndex, Type))
+	{
+		// An empty slot is silent on purpose. The bar draws it as empty, so there is nothing to
+		// explain, and a log line per stray keypress would be noise in a run.
+		return;
+	}
+
+	ServerUseItem(Type);
+}
+
+void AKBCharacter::UseHotbarSlot1(const FInputActionValue& Value) { UseHotbarSlot(0); }
+void AKBCharacter::UseHotbarSlot2(const FInputActionValue& Value) { UseHotbarSlot(1); }
+void AKBCharacter::UseHotbarSlot3(const FInputActionValue& Value) { UseHotbarSlot(2); }
+void AKBCharacter::UseHotbarSlot4(const FInputActionValue& Value) { UseHotbarSlot(3); }
+void AKBCharacter::UseHotbarSlot5(const FInputActionValue& Value) { UseHotbarSlot(4); }
+void AKBCharacter::UseHotbarSlot6(const FInputActionValue& Value) { UseHotbarSlot(5); }
+
+void AKBCharacter::ToggleBackpack(const FInputActionValue& Value)
+{
+	if (AKBPlayerController* KBController = Cast<AKBPlayerController>(GetController()))
+	{
+		KBController->ToggleBackpack();
+	}
+}
+
+void AKBCharacter::OpenBackpackMenu(const FInputActionValue& Value)
+{
+	if (AKBPlayerController* KBController = Cast<AKBPlayerController>(GetController()))
+	{
+		KBController->OpenBackpackMenuUnderCursor();
+	}
+}
+
+void AKBCharacter::DebugUseHotbarSlot(int32 SlotIndex)
+{
+	UE_LOG(LogKillBugs, Display, TEXT("DebugUseHotbarSlot: slot %d, local=%s authority=%s"),
+		SlotIndex + 1,
+		IsLocallyControlled() ? TEXT("yes") : TEXT("no"),
+		HasAuthority() ? TEXT("yes") : TEXT("no"));
+
+	UseHotbarSlot(SlotIndex);
+}
+
+void AKBCharacter::DebugDropItem(EKBItemType Type)
+{
+	UE_LOG(LogKillBugs, Display, TEXT("DebugDropItem: %s, local=%s authority=%s"),
+		*KBItemDisplayName(Type),
+		IsLocallyControlled() ? TEXT("yes") : TEXT("no"),
+		HasAuthority() ? TEXT("yes") : TEXT("no"));
+
+	ServerDropItem(Type);
+}
+
+void AKBCharacter::DebugUseMedkit()
+{
+	// Logged before the attempt, so the reason that follows reads as its result.
+	UE_LOG(LogKillBugs, Display, TEXT("DebugUseMedkit: local=%s authority=%s"),
+		IsLocallyControlled() ? TEXT("yes") : TEXT("no"),
+		HasAuthority() ? TEXT("yes") : TEXT("no"));
+
+	RequestUseMedkit();
 }
 
 void AKBCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -528,11 +728,58 @@ void AKBCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 		EnhancedInput->BindAction(FireAction, ETriggerEvent::Completed, this, &AKBCharacter::StopFire);
 	}
 
-	// A silent failure here is exactly the "left click does nothing" symptom, so say so.
+	// Same runtime-built pattern as fire, for the same reason: no asset to author, and one place
+	// the key is decided.
+	UInputAction* UseItemAction = KBController ? KBController->GetUseItemAction() : nullptr;
+
+	if (UseItemAction)
+	{
+		EnhancedInput->BindAction(UseItemAction, ETriggerEvent::Started, this, &AKBCharacter::UseMedkit);
+	}
+
+	// The backpack panel, its row menu, and the six hotbar keys.
+	UInputAction* BackpackAction = KBController ? KBController->GetBackpackAction() : nullptr;
+	if (BackpackAction)
+	{
+		EnhancedInput->BindAction(BackpackAction, ETriggerEvent::Started, this, &AKBCharacter::ToggleBackpack);
+	}
+
+	UInputAction* BackpackMenuAction = KBController ? KBController->GetBackpackMenuAction() : nullptr;
+	if (BackpackMenuAction)
+	{
+		EnhancedInput->BindAction(BackpackMenuAction, ETriggerEvent::Started, this, &AKBCharacter::OpenBackpackMenu);
+	}
+
+	// One binding per slot, each to its own thin handler. See the note on the handlers for why
+	// these are not one shared function.
+	using FHotbarHandler = void (AKBCharacter::*)(const FInputActionValue&);
+	const FHotbarHandler HotbarHandlers[AKBPlayerController::HotbarSlots] =
+	{
+		&AKBCharacter::UseHotbarSlot1, &AKBCharacter::UseHotbarSlot2, &AKBCharacter::UseHotbarSlot3,
+		&AKBCharacter::UseHotbarSlot4, &AKBCharacter::UseHotbarSlot5, &AKBCharacter::UseHotbarSlot6
+	};
+
+	int32 BoundHotbarKeys = 0;
+	for (int32 SlotIndex = 0; SlotIndex < AKBPlayerController::HotbarSlots; ++SlotIndex)
+	{
+		if (UInputAction* HotbarAction = KBController ? KBController->GetHotbarAction(SlotIndex) : nullptr)
+		{
+			EnhancedInput->BindAction(HotbarAction, ETriggerEvent::Started, this, HotbarHandlers[SlotIndex]);
+			++BoundHotbarKeys;
+		}
+	}
+
+	// A silent failure here is exactly the "left click does nothing" symptom, so say so. The
+	// hotbar count is on the line because a key that failed to bind is otherwise only noticed
+	// when the player presses it in a fight.
 	UE_LOG(LogKillBugs, Display,
-		TEXT("Input bound: move=%s fire=%s (controller=%s)"),
+		TEXT("Input bound: move=%s fire=%s use=%s backpack=%s menukey=%s hotbar=%d/%d (controller=%s)"),
 		MoveAction ? TEXT("yes") : TEXT("NO"),
 		FireAction ? TEXT("yes") : TEXT("NO"),
+		UseItemAction ? TEXT("yes") : TEXT("NO"),
+		BackpackAction ? TEXT("yes") : TEXT("NO"),
+		BackpackMenuAction ? TEXT("yes") : TEXT("NO"),
+		BoundHotbarKeys, AKBPlayerController::HotbarSlots,
 		KBController ? TEXT("KBPlayerController") : TEXT("MISSING"));
 }
 
